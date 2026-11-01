@@ -44,7 +44,10 @@ gets no prompt and no word embeddings. A small trained adapter computes klein's 
   4. the loss is the mean squared error. Only the adapter is trained.
 
   Klein can only denoise well if the conditioning says what the photo is, so the adapter must carry the photo's
-  content from the activation.
+  content from the activation. Plain flow matching first learns one "average photo" conditioning that ignores the
+  activation, so the loss uses contrastive flow matching (Stoica et al. 2025): minus 0.05 times the loss against
+  another photo's target, which rewards only item-specific conditioning. The held-out check reports the loss and its
+  gain over shuffled activation-photo pairs.
 - **Stage C (NLA style, unsupervised reconstruction added).** The adapter makes a picture through klein's 4 sampling
   steps and the VAE decoder, and Qwen3-VL reads it back in the source's own context; gradients flow through all of
   these.

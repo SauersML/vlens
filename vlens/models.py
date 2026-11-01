@@ -141,10 +141,13 @@ class Klein:
     def pack(self, z):
         return z.float().reshape(len(z), 128, -1).permute(0, 2, 1)
 
-    def fm_loss(self, z, C, sig, eps):
+    def fm_loss(self, z, C, sig, eps, lam=0.0):
+        """flow-matching loss per item. lam > 0: contrastive flow matching (Stoica et al. 2025), minus lam times the
+        loss against another item's target (the batch rolled by one), so a prediction gains only by being item-specific"""
         x0 = self.pack(z.to(DEV)); s = sig[:, None, None]
-        pred = self.v((1 - s) * x0 + s * eps, sig, C)
-        return ((pred - (eps - x0)) ** 2).mean((1, 2))
+        pred = self.v((1 - s) * x0 + s * eps, sig, C); tgt = eps - x0
+        loss = ((pred - tgt) ** 2).mean((1, 2))
+        return loss - lam * ((pred - tgt.roll(1, 0)) ** 2).mean((1, 2)) if lam else loss
 
     def noise(self, seeds):
         return torch.stack([torch.randn(self.h * self.h, 128, generator=torch.Generator().manual_seed(int(s))) for s in seeds]).to(DEV)

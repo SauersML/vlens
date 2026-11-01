@@ -91,14 +91,21 @@ def train(W, run, steps, minutes, cycle=False):
     VA = torch.cat([te['see'][vi[:n3]], te['inj'][vi[n3:2 * n3]], te['hold'][vi[2 * n3:]]]); VZ = te['z'][vi]
     VS = K.sig[torch.arange(3 * n3) % 4]; VE = torch.randn(3 * n3, K.h * K.h, 128, generator=vg).to(DEV)
 
+    VA_sh = torch.cat([VA[a:a + n3].roll(1, 0) for a in (0, n3, 2 * n3)])       # each photo paired with another's activation
+
     @torch.no_grad()
     def val():
-        con.eval(); v = torch.cat([K.fm_loss(VZ[i:i + 16], con(VA[i:i + 16].to(DEV)), VS[i:i + 16], VE[i:i + 16]) for i in range(0, 3 * n3, 16)])
-        con.train(); return [round(float(v[a:a + n3].mean()), 4) for a in (0, n3, 2 * n3)]
+        """held-out flow-matching loss per source (see, inj, hold) and its gain over shuffled pairs (the item information)"""
+        con.eval(); out = []
+        for A in (VA, VA_sh):
+            v = torch.cat([K.fm_loss(VZ[i:i + 16], con(A[i:i + 16].to(DEV)), VS[i:i + 16], VE[i:i + 16]) for i in range(0, 3 * n3, 16)])
+            out.append([float(v[a:a + n3].mean()) for a in (0, n3, 2 * n3)])
+        con.train(); return dict(loss=[round(x, 4) for x in out[0]], gain_over_shuffled=[round(y - x, 4) for x, y in zip(*out)])
 
     g = torch.Generator().manual_seed(1 if not cycle else 2)
     B, BC, LAM = (16, 0, 0) if not cycle else (0, 8, 1.0) if PURE else (8, 4, 0.25)
     B, BC = int(os.environ.get('VLENS_B', B)), int(os.environ.get('VLENS_BC', BC))
+    CFM = float(os.environ.get('VLENS_CFM', 0.05))                             # contrastive flow-matching weight
     hist = [dict(step=0, val=val())]; log(tag, 'step 0 val see/inj/hold', hist[0]['val'])
     preview(K, con, D, W, run / f'preview_{tag}_0000.jpg')
     run_l, t_end = [], time.monotonic() + 60 * minutes
@@ -110,7 +117,7 @@ def train(W, run, steps, minutes, cycle=False):
             eps = torch.randn(B, K.h * K.h, 128, generator=g).to(DEV)
             with torch.autocast('cuda', dtype=BF, enabled=DEV == 'cuda'):
                 C = con(A.to(DEV))
-            loss = K.fm_loss(tr['z'][img], C, sig, eps).mean()
+            loss = K.fm_loss(tr['z'][img], C, sig, eps, CFM).mean()
         if cycle:
             kinds, A2, img2, row2 = draw_batch(D, BC, g, (0.3, 0.2, 0.3, 0.2))
             with torch.autocast('cuda', dtype=BF, enabled=DEV == 'cuda'):
@@ -125,7 +132,7 @@ def train(W, run, steps, minutes, cycle=False):
             rec = torch.stack(errs).mean(); loss = loss + LAM * rec; cyc = float(rec); acc = float(np.mean(fves))
         opt.zero_grad(set_to_none=True); loss.backward()
         torch.nn.utils.clip_grad_norm_(con.parameters(), 1.0); opt.step(); sched.step()
-        run_l.append((float(loss), cyc, acc))
+        run_l.append((float(loss.detach()), cyc, acc))
         if step % 50 == 0:
             m = np.mean(run_l, 0); run_l = []
             log(tag, 'step', step, 'loss', round(m[0], 4), 'readback mse', round(m[1], 4), 'readback fve', round(m[2], 4), 'lr', f'{sched.get_last_lr()[0]:.2e}')
