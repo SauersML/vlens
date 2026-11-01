@@ -12,4 +12,5 @@ PY=${PYTHON:-python3}
 $PY -m vlens train "$W" "$W/run" 3 5
 $PY -m vlens cycle "$W" "$W/run" 2 5
 $PY -m vlens eval "$W" "$W/run"
+$PY -m vlens robust "$W/run" 4
 echo TINY_OK

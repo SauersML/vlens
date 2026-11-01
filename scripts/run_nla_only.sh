@@ -12,4 +12,5 @@ mkdir -p "$WORK" "$RUN"
 [ -f "$WORK/data.pt" ] || { echo "VLENS data stage failed"; exit 1; }
 [ -f "$RUN/con_N_fp16.pt" ] || VLENS_PURE=1 $PY -m vlens cycle "$WORK" "$RUN" "$S" "$MIN" 2>&1 | tee -a "$RUN/train_N.log"
 [ -f "$WORK/con_N.pt" ] || { echo "VLENS NLA-only stage failed"; exit 1; }
-$PY -m vlens eval "$WORK" "$RUN" 2>&1 | tee -a "$RUN/eval.log" && echo "VLENS done"
+$PY -m vlens eval "$WORK" "$RUN" 2>&1 | tee -a "$RUN/eval.log"
+$PY -m vlens robust "$RUN" 1000 2>&1 | tee -a "$RUN/robust.log" && echo "VLENS done"

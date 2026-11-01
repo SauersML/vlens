@@ -64,6 +64,10 @@ gets no prompt and no word embeddings. A small trained adapter computes klein's 
 - **SigLIP 2 rank.** The real photo's rank among the 1,000 real photos by SigLIP 2 (so400m/16-512) image-image
   similarity. No stage trains on this scorer.
 - **Text route.** Klein given the caption as an ordinary prompt: the text-bottleneck reference.
+- **Robustness.** Each picture is read back again after degradations a viewer barely notices (256 px JPEG, JPEG
+  quality 30, half resolution), with real photos degraded the same way as the reference. If a picture's
+  reconstruction falls much further than the real photos' does, its information sits in pixel patterns that only the
+  reader decodes, not in the scene.
 - **Prior control.** Random activations with the same per-dimension mean and spread as real ones. If these also
   produce confident, meaningful scenes, the pictures reflect klein's prior rather than Qwen's state.
 
