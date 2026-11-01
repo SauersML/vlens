@@ -112,7 +112,13 @@ class Reader:
 
 
 class Klein:
-    def __init__(self, text_encoder=False):
+    """FLUX.2 [klein] 4B, frozen. Pictures come from the step-distilled model's own 4-step sampler. With base=True the
+    undistilled klein base 4B (same architecture, scheduler and conditioning space) is loaded too, and flow matching
+    trains on it: a step-distilled model commits to one sharp sample at each step, so its squared error against a real
+    photo is lowest for conditionings that make it output a blurry average (measured: at the first step the blank
+    conditioning scored 1.10 and the true caption 1.58), while the base model predicts the conditional mean, the
+    quantity that loss is minimized by."""
+    def __init__(self, text_encoder=False, base=False):
         from diffusers import Flux2KleinPipeline
         from diffusers.pipelines.flux2.pipeline_flux2_klein import compute_empirical_mu, retrieve_timesteps
         root = snap(KLEIN, ignore=['*.jpg', 'flux-2-klein*.safetensors'])
@@ -125,6 +131,14 @@ class Klein:
         self.sig = self.pipe.scheduler.sigmas.float().to(DEV)                        # 4 steps + the final 0
         assert len(self.sig) == 5 and float(self.sig[-1]) == 0, self.sig
         self.ids = self.pipe._prepare_latent_ids(torch.zeros(1, 128, self.h, self.h)).to(DEV)
+        self.tf_base = None
+        if base:
+            from diffusers import Flux2Transformer2DModel, FlowMatchEulerDiscreteScheduler
+            rb = snap(KLEIN_BASE, ignore=['*.jpg', 'flux-2-klein*.safetensors', 'text_encoder/*', 'tokenizer/*', 'vae/*'])
+            self.tf_base = Flux2Transformer2DModel.from_pretrained(rb, subfolder='transformer', torch_dtype=BF).to(DEV).requires_grad_(False)
+            sch = FlowMatchEulerDiscreteScheduler.from_pretrained(rb, subfolder='scheduler')
+            retrieve_timesteps(sch, 50, DEV, sigmas=np.linspace(1.0, 1 / 50, 50), mu=compute_empirical_mu(image_seq_len=self.h * self.h, num_steps=50))
+            self.sig_base = sch.sigmas[:50].float().to(DEV)                          # the base model's 50 sampling noise levels
         bn = self.vae.bn
         self.bn_m = bn.running_mean.view(1, -1, 1, 1).float().to(DEV)
         self.bn_s = torch.sqrt(bn.running_var.view(1, -1, 1, 1) + self.vae.config.batch_norm_eps).float().to(DEV)
@@ -133,19 +147,20 @@ class Klein:
     def encode(self, x):
         return self.pipe._encode_vae_image(x.to(DEV, BF), None)                       # [B,128,h,h] (patchified, normalized)
 
-    def v(self, xt, s, C):
+    def v(self, xt, s, C, base=False):
         tids = self.pipe._prepare_text_ids(C).to(DEV)
-        return self.tf(hidden_states=xt.to(BF), timestep=s.to(BF), guidance=None, encoder_hidden_states=C.to(BF),
+        return (self.tf_base if base else self.tf)(hidden_states=xt.to(BF), timestep=s.to(BF), guidance=None, encoder_hidden_states=C.to(BF),
                        txt_ids=tids, img_ids=self.ids.expand(len(xt), -1, -1), return_dict=False)[0].float()
 
     def pack(self, z):
         return z.float().reshape(len(z), 128, -1).permute(0, 2, 1)
 
-    def fm_loss(self, z, C, sig, eps, lam=0.0):
-        """flow-matching loss per item. lam > 0: contrastive flow matching (Stoica et al. 2025), minus lam times the
-        loss against another item's target (the batch rolled by one), so a prediction gains only by being item-specific"""
+    def fm_loss(self, z, C, sig, eps, lam=0.0, base=True):
+        """flow-matching loss per item, on the base model unless base=False. lam > 0: contrastive flow matching (Stoica
+        et al. 2025), minus lam times the loss against another item's target (the batch rolled by one), so a prediction
+        gains only by being item-specific"""
         x0 = self.pack(z.to(DEV)); s = sig[:, None, None]
-        pred = self.v((1 - s) * x0 + s * eps, sig, C); tgt = eps - x0
+        pred = self.v((1 - s) * x0 + s * eps, sig, C, base=base and self.tf_base is not None); tgt = eps - x0
         loss = ((pred - tgt) ** 2).mean((1, 2))
         return loss - lam * ((pred - tgt.roll(1, 0)) ** 2).mean((1, 2)) if lam else loss
 

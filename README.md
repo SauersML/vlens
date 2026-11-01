@@ -37,10 +37,15 @@ gets no prompt and no word embeddings. A small trained adapter computes klein's 
 
 ## Training
 
-- **Stage B (oracle style, supervised).** Klein's own flow-matching loss, with the real photo as the target:
+- **Stage B (oracle style, supervised).** Flow matching with the real photo as the target, on the undistilled klein
+  base 4B (same architecture and conditioning space as the step-distilled klein that draws the pictures). On the
+  distilled model this loss fails: it commits to one sharp sample per step, so its error against a real photo is
+  lowest for conditionings that make it output a blurry average (at the first step the blank conditioning scored 1.10,
+  the true caption 1.58), and the adapter learned exactly that, one average-photo conditioning that ignores the
+  activation. The steps:
   1. encode the photo with klein's VAE (latent x0);
-  2. mix in noise at one of klein's 4 sampling levels, x_t = (1 - s) x0 + s * noise;
-  3. klein predicts the velocity (noise - x0) from x_t, s and the adapter's conditioning;
+  2. mix in noise at one of the base model's 50 sampling levels, x_t = (1 - s) x0 + s * noise;
+  3. klein base predicts the velocity (noise - x0) from x_t, s and the adapter's conditioning;
   4. the loss is the mean squared error. Only the adapter is trained.
 
   Klein can only denoise well if the conditioning says what the photo is, so the adapter must carry the photo's
@@ -82,7 +87,7 @@ scripts/test_tiny.sh                      # every stage in minutes, small random
 scripts/run_all.sh /data/work /data/run   # full run on one 80 GB GPU, about 4 hours on an A100
 ```
 
-All models and data are public: Qwen/Qwen3-VL-4B-Instruct, black-forest-labs/FLUX.2-klein-4B (Apache 2.0),
+All models and data are public: Qwen/Qwen3-VL-4B-Instruct, black-forest-labs/FLUX.2-klein-4B and FLUX.2-klein-base-4B (Apache 2.0),
 google/siglip2-so400m-patch16-512, yerevann/coco-karpathy (COCO image URLs), pixparse/cc3m-wds.
 
 ## Status

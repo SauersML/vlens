@@ -67,8 +67,8 @@ def preview(K, con, D, W, path):
 
 def train(W, run, steps, minutes, cycle=False):
     W, run = Path(W), Path(run); run.mkdir(parents=True, exist_ok=True)
-    D = load_data(W); K = Klein(); tr = D['tr']
-    K.tf.enable_gradient_checkpointing()
+    D = load_data(W); K = Klein(base=True); tr = D['tr']
+    K.tf.enable_gradient_checkpointing(); K.tf_base.enable_gradient_checkpointing()
     con = make_connector(D).to(DEV)
     PURE = cycle and os.environ.get('VLENS_PURE') == '1'   # NLA only: from the blank adapter, reconstruction loss alone, no photo
     tag = 'N' if PURE else 'C' if cycle else 'B'
@@ -89,7 +89,7 @@ def train(W, run, steps, minutes, cycle=False):
     sched = torch.optim.lr_scheduler.LambdaLR(opt, lambda s: min(1.0, (s + 1) / warm) * (0.1 + 0.9 * 0.5 * (1 + math.cos(math.pi * min(1.0, s / steps)))))
     vg = torch.Generator().manual_seed(7); te = D['te']; vi = test_idx(D, 96); n3 = len(vi) // 3; vi = vi[:3 * n3]
     VA = torch.cat([te['see'][vi[:n3]], te['inj'][vi[n3:2 * n3]], te['hold'][vi[2 * n3:]]]); VZ = te['z'][vi]
-    VS = K.sig[torch.arange(3 * n3) % 4]; VE = torch.randn(3 * n3, K.h * K.h, 128, generator=vg).to(DEV)
+    VS = K.sig_base[torch.tensor([0, 12, 25, 37])[torch.arange(3 * n3) % 4]]; VE = torch.randn(3 * n3, K.h * K.h, 128, generator=vg).to(DEV)
 
     VA_sh = torch.cat([VA[a:a + n3].roll(1, 0) for a in (0, n3, 2 * n3)])       # each photo paired with another's activation
 
@@ -113,7 +113,7 @@ def train(W, run, steps, minutes, cycle=False):
         loss = torch.zeros((), device=DEV); cyc = acc = 0.0
         if B > 0:
             _, A, img, _ = draw_batch(D, B, g, (0.4, 0.3, 0.3, 0.0))
-            sig = K.sig[torch.randint(0, 4, (B,), generator=g).to(DEV)]
+            sig = K.sig_base[torch.randint(0, len(K.sig_base), (B,), generator=g).to(DEV)]
             eps = torch.randn(B, K.h * K.h, 128, generator=g).to(DEV)
             with torch.autocast('cuda', dtype=BF, enabled=DEV == 'cuda'):
                 C = con(A.to(DEV))
