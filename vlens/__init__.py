@@ -15,7 +15,7 @@ conditioning (M=64 tokens of 7,680) is computed from the activation by a trained
                           the picture in the source's own context, the picture in place of the content -> activation;
                           mean squared error against the source after standardizing each dimension (fixed constants).
                           No probe or readout is fitted; needs no photo (characters train on it alone).
-  eval  1,000 held-out photos (500 COCO, 500 CC3M) x 4 sources, 60 held-out characters, 60 random activations (same
+  eval  1,000 held-out photos (500 COCO, 500 CC3M) x 4 sources, 53 held-out characters, 60 random activations (same
         per-dimension mean and spread: the prior control); fraction of variance explained with the real photo read back
         the same way as the ceiling and shuffled pairs as the floor; readback ranks; SigLIP 2 image-image ranks against
         the real photos (a scorer no stage trained on); the text route (klein given the caption) as the reference.

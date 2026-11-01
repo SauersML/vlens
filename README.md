@@ -33,7 +33,7 @@ gets no prompt and no word embeddings. A small trained adapter computes klein's 
 | `see` | a real photo (COCO or CC3M) and "keep it in mind, just reply OK"; no caption anywhere | the photo |
 | `inj` | a text-only chat with no image and no description. The see context's states at the 5 reply-start positions after layer 8 are copied in, bypassing tokens, and the model computes on from there | the photo |
 | `hold` | the photo's caption in a text-only chat, under 7 training wordings and 2 test wordings | the photo |
-| `char` | "You are <character>" chats (300 characters, 60 held out) | none |
+| `char` | "You are <character>" chats (264 characters, 53 held out) | none |
 
 ## Training
 
@@ -56,7 +56,7 @@ gets no prompt and no word embeddings. A small trained adapter computes klein's 
 
 ## Evaluation
 
-- **Test sets.** 1,000 held-out photos (500 COCO, 500 CC3M) under 4 sources, plus 60 held-out characters.
+- **Test sets.** 1,000 held-out photos (500 COCO, 500 CC3M) under 4 sources, plus 53 held-out characters.
 - **Reconstruction.** Fraction of variance explained between the readback and the source activation (standardized).
   Two references: the real photo read back in the same context (how much any picture could explain), and shuffled
   pairs (no item information).
