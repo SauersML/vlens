@@ -1,0 +1,8 @@
+__pycache__/
+*.pyc
+*.egg-info/
+tiny_run/
+runs/
+*.pt
+*.partial
+.DS_Store

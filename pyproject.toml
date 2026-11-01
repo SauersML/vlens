@@ -1,0 +1,32 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "vlens"
+version = "0.1.0"
+description = "Turn one hidden activation of Qwen3-VL into a picture with FLUX.2 [klein], with no text in the image path, and read it back with the same model"
+readme = "README.md"
+license = { text = "MIT" }
+authors = [{ name = "SauersML" }]
+requires-python = ">=3.10"
+dependencies = [
+    "torch>=2.10",
+    "torchvision",
+    "transformers>=5.17",
+    "diffusers>=0.42.1",
+    "huggingface_hub",
+    "numpy",
+    "pandas",
+    "pyarrow",
+    "pillow",
+]
+
+[project.urls]
+Repository = "https://github.com/SauersML/vlens"
+
+[tool.setuptools]
+packages = ["vlens"]
+
+[tool.setuptools.package-data]
+vlens = ["characters.txt"]
