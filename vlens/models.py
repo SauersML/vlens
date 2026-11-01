@@ -5,7 +5,7 @@ from .common import *
 class Reader:
     """Qwen3-VL-4B activations: hooks on decoder layers 9/18/27 (outputs = hidden_states[9/18/27], pre-norm); the
     language model is cut after layer 27. see(x) is differentiable in the pixels (the processor's own patchify)."""
-    def __init__(self, model=None):
+    def __init__(self, model=None, cut=True):
         from transformers import AutoProcessor, Qwen3VLForConditionalGeneration
         root = snap(VL)
         self.proc = AutoProcessor.from_pretrained(root)
@@ -17,7 +17,8 @@ class Reader:
             model = Qwen3VLForConditionalGeneration(cfg).to(BF)
         m = model if model is not None else Qwen3VLForConditionalGeneration.from_pretrained(root, dtype=BF)
         lm = m.model.language_model
-        lm.layers = lm.layers[:max(READ)]
+        if cut:                                                   # keep every layer when the model also generates
+            lm.layers = lm.layers[:max(READ)]
         self.m = m.model.to(DEV).eval().requires_grad_(False); self.layers = lm.layers
         ip = self.proc.image_processor; self.ip = ip
         self.mean = torch.tensor(ip.image_mean, device=DEV).view(1, 3, 1, 1); self.std = torch.tensor(ip.image_std, device=DEV).view(1, 3, 1, 1)
