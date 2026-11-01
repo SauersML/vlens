@@ -1,6 +1,30 @@
-"""Stages B (flow matching on the real photo) and C (+ direct reconstruction: the picture read back by Qwen3-VL in its source's own context, standardized mean squared error; no fitted readout)."""
+"""Stage B (oracle style): end to end through klein's 4-step sampler and the VAE decoder, the adapter's picture is
+compared with the real photo in DINOv2 features (every patch: layout; the class token: content), plus flow matching
+on the undistilled klein base as a prior that keeps the conditioning in the region klein draws photos from.
+Stage C (NLA style): + direct reconstruction, the picture read back by Qwen3-VL in its source's own context
+(standardized mean squared error; no fitted readout); gradients flow through the reader, the decoder and the sampler."""
 from .common import *
 from .models import Reader, Klein, Connector
+
+
+class Photo:
+    """DINOv2-base features of pictures [B,3,PX,PX] in [-1,1] (averaged to 192 px, then 224 px): the class token and the
+    256 patch tokens.
+    Frozen; differentiable in the pictures. loss: (1 - cos) of the class tokens + mean over patches of (1 - cos)."""
+    def __init__(self):
+        from transformers import AutoModel
+        self.m = AutoModel.from_pretrained(snap(DINO), dtype=BF).to(DEV).eval().requires_grad_(False)
+        self.mean = torch.tensor([0.485, 0.456, 0.406], device=DEV).view(1, 3, 1, 1); self.std = torch.tensor([0.229, 0.224, 0.225], device=DEV).view(1, 3, 1, 1)
+
+    def __call__(self, x):
+        x = F.avg_pool2d((x.float() + 1) / 2, x.shape[-1] // 192)            # exact 2x2 average to 192 px (no aliasing)
+        x = F.interpolate(x, size=(224, 224), mode='bilinear', align_corners=False)
+        h = self.m(pixel_values=((x - self.mean) / self.std).to(BF)).last_hidden_state.float()
+        return h[:, 0], h[:, 1:]
+
+    @staticmethod
+    def loss(f, ref):
+        return (1 - F.cosine_similarity(f[0], ref[0], dim=-1)) + (1 - F.cosine_similarity(f[1], ref[1], dim=-1).mean(1))
 
 
 def load_data(W):
@@ -69,6 +93,10 @@ def train(W, run, steps, minutes, cycle=False):
     W, run = Path(W), Path(run); run.mkdir(parents=True, exist_ok=True)
     D = load_data(W); K = Klein(base=True); tr = D['tr']
     K.tf.enable_gradient_checkpointing(); K.tf_base.enable_gradient_checkpointing()
+    try:
+        K.vae.enable_gradient_checkpointing()
+    except Exception as e:
+        log('vae checkpointing unavailable', e)
     con = make_connector(D).to(DEV)
     PURE = cycle and os.environ.get('VLENS_PURE') == '1'   # NLA only: from the blank adapter, reconstruction loss alone, no photo
     tag = 'N' if PURE else 'C' if cycle else 'B'
@@ -76,10 +104,6 @@ def train(W, run, steps, minutes, cycle=False):
         if not PURE:
             con.load_state_dict(torch.load(W / 'con_B.pt', weights_only=False)['state'])
         R = Reader()
-        try:
-            K.vae.enable_gradient_checkpointing()
-        except Exception as e:
-            log('vae checkpointing unavailable', e)
         mu, sd = source_stats(D)
         mu = {k: v.to(DEV) for k, v in mu.items()}; sd = {k: v.to(DEV) for k, v in sd.items()}
         nW = len(CHAR_T)
@@ -92,6 +116,21 @@ def train(W, run, steps, minutes, cycle=False):
     VS = K.sig_base[torch.tensor([0, 12, 25, 37])[torch.arange(3 * n3) % 4]]; VE = torch.randn(3 * n3, K.h * K.h, 128, generator=vg).to(DEV)
 
     VA_sh = torch.cat([VA[a:a + n3].roll(1, 0) for a in (0, n3, 2 * n3)])       # each photo paired with another's activation
+    P = Photo(); n8 = min(8, n3)                                                # end-to-end check: 8 test items per source
+    PA = torch.cat([VA[a:a + n8] for a in (0, n3, 2 * n3)]); PI = torch.cat([vi[a:a + n8] for a in (0, n3, 2 * n3)])
+    with torch.no_grad():
+        PR = P(K.decode(K.pack(te['z'][PI].to(DEV))).clamp(-1, 1))          # the real photos (VAE round trip)
+    PR_sh = tuple(torch.cat([r[a:a + n8].roll(1, 0) for a in (0, n8, 2 * n8)]) for r in PR)
+    PN = torch.randn(3 * n8, K.h * K.h, 128, generator=torch.Generator().manual_seed(8)).to(DEV)
+
+    @torch.no_grad()
+    def val_photo():
+        """the adapter's pictures of 8 test items per source (fixed noise) against their own photos and against
+        shuffled ones (DINOv2 loss; gain = shuffled - own)"""
+        con.eval(); f = P(K.decode(K.sample(con(PA.to(DEV)), PN)).clamp(-1, 1)); con.train()
+        own, sh = Photo.loss(f, PR), Photo.loss(f, PR_sh)
+        return dict(photo_loss=[round(float(own[a:a + n8].mean()), 4) for a in (0, n8, 2 * n8)],
+                    photo_gain_over_shuffled=[round(float((sh - own)[a:a + n8].mean()), 4) for a in (0, n8, 2 * n8)])
 
     @torch.no_grad()
     def val():
@@ -103,21 +142,31 @@ def train(W, run, steps, minutes, cycle=False):
         con.train(); return dict(loss=[round(x, 4) for x in out[0]], gain_over_shuffled=[round(y - x, 4) for x, y in zip(*out)])
 
     g = torch.Generator().manual_seed(1 if not cycle else 2)
-    B, BC, LAM = (16, 0, 0) if not cycle else (0, 8, 1.0) if PURE else (8, 4, 0.25)
-    B, BC = int(os.environ.get('VLENS_B', B)), int(os.environ.get('VLENS_BC', BC))
+    B, BP, BC, LAM = (4, 6, 0, 0) if not cycle else (0, 0, 8, 1.0) if PURE else (4, 2, 4, 0.25)
+    B, BP, BC = int(os.environ.get('VLENS_B', B)), int(os.environ.get('VLENS_BP', BP)), int(os.environ.get('VLENS_BC', BC))
     CFM = float(os.environ.get('VLENS_CFM', 0.05))                             # contrastive flow-matching weight
-    hist = [dict(step=0, val=val())]; log(tag, 'step 0 val see/inj/hold', hist[0]['val'])
+    EVERY = int(os.environ.get('VLENS_EVERY', 500))
+    vals = lambda: dict(**val(), **val_photo())
+    hist = [dict(step=0, val=vals())]; log(tag, 'step 0 val see/inj/hold', hist[0]['val'])
     preview(K, con, D, W, run / f'preview_{tag}_0000.jpg')
     run_l, t_end = [], time.monotonic() + 60 * minutes
     for step in range(1, steps + 1):
-        loss = torch.zeros((), device=DEV); cyc = acc = 0.0
+        loss = torch.zeros((), device=DEV); cyc = acc = pl = 0.0
+        if BP > 0:                                                             # end to end: picture vs the real photo
+            _, A3, img3, _ = draw_batch(D, BP, g, (0.4, 0.3, 0.3, 0.0))
+            with torch.no_grad():
+                ref = P(K.decode(K.pack(tr['z'][img3].to(DEV))).clamp(-1, 1))
+            with torch.autocast('cuda', dtype=BF, enabled=DEV == 'cuda'):
+                C3 = con(A3.to(DEV))
+            x3 = K.decode(K.sample(C3, torch.randn(BP, K.h * K.h, 128, generator=g).to(DEV))).clamp(-1, 1)
+            lp = Photo.loss(P(x3), ref).mean(); loss = loss + lp; pl = float(lp.detach())
         if B > 0:
             _, A, img, _ = draw_batch(D, B, g, (0.4, 0.3, 0.3, 0.0))
             sig = K.sig_base[torch.randint(0, len(K.sig_base), (B,), generator=g).to(DEV)]
             eps = torch.randn(B, K.h * K.h, 128, generator=g).to(DEV)
             with torch.autocast('cuda', dtype=BF, enabled=DEV == 'cuda'):
                 C = con(A.to(DEV))
-            loss = K.fm_loss(tr['z'][img], C, sig, eps, CFM).mean()
+            loss = loss + K.fm_loss(tr['z'][img], C, sig, eps, CFM).mean()
         if cycle:
             kinds, A2, img2, row2 = draw_batch(D, BC, g, (0.3, 0.2, 0.3, 0.2))
             with torch.autocast('cuda', dtype=BF, enabled=DEV == 'cuda'):
@@ -132,13 +181,13 @@ def train(W, run, steps, minutes, cycle=False):
             rec = torch.stack(errs).mean(); loss = loss + LAM * rec; cyc = float(rec); acc = float(np.mean(fves))
         opt.zero_grad(set_to_none=True); loss.backward()
         torch.nn.utils.clip_grad_norm_(con.parameters(), 1.0); opt.step(); sched.step()
-        run_l.append((float(loss.detach()), cyc, acc))
+        run_l.append((float(loss.detach()), pl, cyc, acc))
         if step % 50 == 0:
             m = np.mean(run_l, 0); run_l = []
-            log(tag, 'step', step, 'loss', round(m[0], 4), 'readback mse', round(m[1], 4), 'readback fve', round(m[2], 4), 'lr', f'{sched.get_last_lr()[0]:.2e}')
+            log(tag, 'step', step, 'loss', round(m[0], 4), 'photo', round(m[1], 4), 'readback mse', round(m[2], 4), 'readback fve', round(m[3], 4), 'lr', f'{sched.get_last_lr()[0]:.2e}')
         last = step == steps or time.monotonic() > t_end
-        if step % 500 == 0 or last:
-            hist.append(dict(step=step, val=val())); log(tag, 'step', step, 'val see/inj/hold', hist[-1]['val'])
+        if step % EVERY == 0 or last:
+            hist.append(dict(step=step, val=vals())); log(tag, 'step', step, 'val see/inj/hold', hist[-1]['val'])
             save(dict(state={k: t.cpu() for k, t in con.state_dict().items()}, hist=hist, step=step), W / f'con_{tag}.pt')
             preview(K, con, D, W, run / f'preview_{tag}_{step:04d}.jpg')
         if last:

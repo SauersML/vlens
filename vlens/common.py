@@ -12,6 +12,7 @@ from PIL import Image
 DEV = 'cuda' if torch.cuda.is_available() else 'mps'
 BF = torch.bfloat16
 KLEIN, VL, SIGLIP = 'black-forest-labs/FLUX.2-klein-4B', 'Qwen/Qwen3-VL-4B-Instruct', 'google/siglip2-so400m-patch16-512'
+DINO = 'facebook/dinov2-base'                                  # the picture-to-photo comparison of stage B (not the eval scorer)
 KLEIN_BASE = os.environ.get('VLENS_KLEIN_BASE', 'black-forest-labs/FLUX.2-klein-base-4B')   # undistilled: flow matching trains on it
 READ, PX, M, L_INJ, TP = (9, 18, 27), 384, 64, 8, 5
 N_TE = int(os.environ.get('VLENS_NTE', 500))                  # test photos per dataset
