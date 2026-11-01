@@ -31,7 +31,7 @@ def evaluate(W, run):
     srcs = dict(see=te['see'][good], inj=te['inj'][good], holdT1=te['hold'][good], holdT2=te['hold'][nte + good],
                 char=D['char']['A_te'][::len(CHAR_T)][:NX], random=rand.half())
     K = Klein(); pics = {}
-    for tag in ('B', 'C'):
+    for tag in ('B', 'C', 'N'):
         p = W / f'con_{tag}.pt'
         if not p.exists():
             continue

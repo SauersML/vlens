@@ -70,9 +70,11 @@ def train(W, run, steps, minutes, cycle=False):
     D = load_data(W); K = Klein(); tr = D['tr']
     K.tf.enable_gradient_checkpointing()
     con = make_connector(D).to(DEV)
-    tag = 'C' if cycle else 'B'
+    PURE = cycle and os.environ.get('VLENS_PURE') == '1'   # NLA only: from the blank adapter, reconstruction loss alone, no photo
+    tag = 'N' if PURE else 'C' if cycle else 'B'
     if cycle:
-        con.load_state_dict(torch.load(W / 'con_B.pt', weights_only=False)['state'])
+        if not PURE:
+            con.load_state_dict(torch.load(W / 'con_B.pt', weights_only=False)['state'])
         R = Reader()
         try:
             K.vae.enable_gradient_checkpointing()
@@ -81,7 +83,7 @@ def train(W, run, steps, minutes, cycle=False):
         mu, sd = source_stats(D)
         mu = {k: v.to(DEV) for k, v in mu.items()}; sd = {k: v.to(DEV) for k, v in sd.items()}
         nW = len(CHAR_T)
-    lr = 5e-5 if cycle else 2e-4
+    lr = 5e-5 if cycle and not PURE else 2e-4
     opt = torch.optim.AdamW([p for p in con.parameters() if p.requires_grad], lr=lr, weight_decay=0.01, betas=(0.9, 0.99))
     warm = 100 if cycle else 300
     sched = torch.optim.lr_scheduler.LambdaLR(opt, lambda s: min(1.0, (s + 1) / warm) * (0.1 + 0.9 * 0.5 * (1 + math.cos(math.pi * min(1.0, s / steps)))))
@@ -95,18 +97,20 @@ def train(W, run, steps, minutes, cycle=False):
         con.train(); return [round(float(v[a:a + n3].mean()), 4) for a in (0, n3, 2 * n3)]
 
     g = torch.Generator().manual_seed(1 if not cycle else 2)
-    B, BC, LAM = (16, 0, 0) if not cycle else (8, 4, 0.25)
+    B, BC, LAM = (16, 0, 0) if not cycle else (0, 8, 1.0) if PURE else (8, 4, 0.25)
     B, BC = int(os.environ.get('VLENS_B', B)), int(os.environ.get('VLENS_BC', BC))
     hist = [dict(step=0, val=val())]; log(tag, 'step 0 val see/inj/hold', hist[0]['val'])
     preview(K, con, D, W, run / f'preview_{tag}_0000.jpg')
     run_l, t_end = [], time.monotonic() + 60 * minutes
     for step in range(1, steps + 1):
-        _, A, img, _ = draw_batch(D, B, g, (0.4, 0.3, 0.3, 0.0))
-        sig = K.sig[torch.randint(0, 4, (B,), generator=g).to(DEV)]
-        eps = torch.randn(B, K.h * K.h, 128, generator=g).to(DEV)
-        with torch.autocast('cuda', dtype=BF, enabled=DEV == 'cuda'):
-            C = con(A.to(DEV))
-        loss = K.fm_loss(tr['z'][img], C, sig, eps).mean(); cyc = acc = 0.0
+        loss = torch.zeros((), device=DEV); cyc = acc = 0.0
+        if B > 0:
+            _, A, img, _ = draw_batch(D, B, g, (0.4, 0.3, 0.3, 0.0))
+            sig = K.sig[torch.randint(0, 4, (B,), generator=g).to(DEV)]
+            eps = torch.randn(B, K.h * K.h, 128, generator=g).to(DEV)
+            with torch.autocast('cuda', dtype=BF, enabled=DEV == 'cuda'):
+                C = con(A.to(DEV))
+            loss = K.fm_loss(tr['z'][img], C, sig, eps).mean()
         if cycle:
             kinds, A2, img2, row2 = draw_batch(D, BC, g, (0.3, 0.2, 0.3, 0.2))
             with torch.autocast('cuda', dtype=BF, enabled=DEV == 'cuda'):
