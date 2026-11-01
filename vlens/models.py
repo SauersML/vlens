@@ -21,11 +21,7 @@ class Reader:
         self.m = m.model.to(DEV).eval().requires_grad_(False); self.layers = lm.layers
         ip = self.proc.image_processor; self.ip = ip
         self.mean = torch.tensor(ip.image_mean, device=DEV).view(1, 3, 1, 1); self.std = torch.tensor(ip.image_std, device=DEV).view(1, 3, 1, 1)
-        msgs = [{'role': 'user', 'content': [{'type': 'image'}, {'type': 'text', 'text': SEE_T}]}]
-        self.see_text = self.proc.apply_chat_template(msgs, tokenize=False, add_generation_prompt=True)
-        enc = self.proc(text=[self.see_text], images=[Image.new('RGB', (PX, PX), (127, 127, 127))], return_tensors='pt')
-        self.see_ids = enc['input_ids'].to(DEV); self.grid = enc['image_grid_thw']
-        self.see_extra = {k: v.to(DEV) for k, v in enc.items() if k not in ('input_ids', 'attention_mask', 'pixel_values', 'image_grid_thw')}
+        self.ctx = {}; self.see_ids = self.image_ctx('see')[0]
         assert self.grid.tolist() == [[1, PX // ip.patch_size, PX // ip.patch_size]], self.grid
         self.neutral_ids = self.proc.tokenizer([self.chat(NEUTRAL_T)], return_tensors='pt')['input_ids'].to(DEV)
         tail = lambda ids: self.proc.tokenizer.convert_ids_to_tokens(ids[0, -TP:].tolist())
@@ -62,13 +58,41 @@ class Reader:
         p, gh, gw = self.ip.patchify(x, patch_size=self.ip.patch_size, merge_size=self.ip.merge_size, temporal_patch_size=self.ip.temporal_patch_size)
         return p.reshape(-1, p.shape[-1])
 
-    def see(self, x, grab=False):
-        B = len(x); ids = self.see_ids.expand(B, -1)
+    def image_ctx(self, key):
+        """token ids (+ the processor's other outputs) of a chat holding one PX-px image, cached: 'see' (SEE_T) or
+        (kind, wording) for a hold or character wording with the image in place of its {c} / {x} slot"""
+        if key not in self.ctx:
+            if key == 'see':
+                content = [{'type': 'image'}, {'type': 'text', 'text': SEE_T}]
+            else:
+                t = key[1]; pre, post = t.split('{c}' if '{c}' in t else '{x}')
+                content = ([{'type': 'text', 'text': pre}] if pre.strip() else []) + [{'type': 'image'}] + ([{'type': 'text', 'text': post}] if post.strip() else [])
+            text = self.proc.apply_chat_template([{'role': 'user', 'content': content}], tokenize=False, add_generation_prompt=True)
+            enc = self.proc(text=[text], images=[Image.new('RGB', (PX, PX), (127, 127, 127))], return_tensors='pt')
+            self.grid = enc['image_grid_thw']
+            self.ctx[key] = (enc['input_ids'].to(DEV), {k: v.to(DEV) for k, v in enc.items() if k not in ('input_ids', 'attention_mask', 'pixel_values', 'image_grid_thw')})
+        return self.ctx[key]
+
+    def look(self, x, key='see', grab=False):
+        """activation of the chat `key` with the images x [B,3,PX,PX] in [-1,1] in it (differentiable in x)"""
+        ids, extra = self.image_ctx(key); B = len(x); ids = ids.expand(B, -1)
         last = torch.full((B,), ids.shape[1] - 1, device=DEV)
         return self._run(last, grab=grab, input_ids=ids, attention_mask=torch.ones_like(ids), pixel_values=self.pixels(x.to(DEV)).to(BF),
-                         image_grid_thw=self.grid.expand(B, -1).to(DEV), **{k: v.expand(B, *v.shape[1:]) for k, v in self.see_extra.items()})
+                         image_grid_thw=self.grid.expand(B, -1).to(DEV), **{k: v.expand(B, *v.shape[1:]) for k, v in extra.items()})
 
-    @torch.no_grad()
+    def see(self, x, grab=False):
+        return self.look(x, 'see', grab)
+
+    def readback(self, x, kind, wording=None):
+        """pictures read back in the context their source came from, the picture in place of the content: see -> SEE_T;
+        inj -> the same layer-L_INJ reply-start transplant into NEUTRAL_T, taken from the picture; hold / char -> that
+        wording with the picture in its {c} / {x} slot. Differentiable in x."""
+        if kind == 'inj':
+            return self.inject(self.see(x, grab=True)[1])
+        if kind in ('hold', 'char'):
+            return self.look(x, (kind, wording))
+        return self.see(x)
+
     def inject(self, H):
         """H [B,TP,d]: states after layer L_INJ at the reply-start positions of a see context -> NEUTRAL_T chat"""
         B = len(H); ids = self.neutral_ids.expand(B, -1)

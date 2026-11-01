@@ -1,4 +1,4 @@
-"""Stages B (flow matching on the real photo) and C (+ direct readback through Qwen3-VL, no fitted readout)."""
+"""Stages B (flow matching on the real photo) and C (+ direct reconstruction: the picture read back by Qwen3-VL in its source's own context, standardized mean squared error; no fitted readout)."""
 from .common import *
 from .models import Reader, Klein, Connector
 
@@ -9,6 +9,15 @@ def load_data(W):
     D['tr_img'] = torch.nonzero(tr['ok']).squeeze(1)
     D['tr_hold'] = torch.nonzero(tr['ok'][tr['hold_items'][:, 0]]).squeeze(1)
     return D
+
+
+def source_stats(D, n=30000):
+    """per-dimension mean and spread of each kind's training source activations (a sample of n rows): the fixed
+    standardization of the readback loss and of fraction of variance explained"""
+    tr = D['tr']; g = torch.Generator().manual_seed(0); mu, sd = {}, {}
+    for k, A in (('see', tr['see'][D['tr_img']]), ('inj', tr['inj'][D['tr_img']]), ('hold', tr['hold'][D['tr_hold']]), ('char', D['char']['A_tr'])):
+        A = A[torch.randperm(len(A), generator=g)[:n]].float(); mu[k], sd[k] = A.mean(0), A.std(0) + 1e-3
+    return mu, sd
 
 
 def make_connector(D):
@@ -69,16 +78,8 @@ def train(W, run, steps, minutes, cycle=False):
             K.vae.enable_gradient_checkpointing()
         except Exception as e:
             log('vae checkpointing unavailable', e)
-        bank, mu = {}, {}
-        ok = tr['ok']; hok = ok[tr['hold_items'][:, 0]]
-        for k, A, good in (('see', tr['see'], ok), ('inj', tr['inj'], ok), ('hold', tr['hold'], hok),
-                           ('char', D['char']['A_tr'], torch.ones(len(D['char']['A_tr']), dtype=torch.bool))):
-            mu[k] = A[good].float().mean(0).to(DEV)
-            bank[k] = (F.normalize(A.float().to(DEV) - mu[k], dim=-1).to(BF), ~good.to(DEV))
-        mu_see = mu['see']
-        hi = tr['hold_items']; same_img = {}                                       # hold rows sharing an image
-        for r, i in enumerate(hi[:, 0].tolist()):
-            same_img.setdefault(i, []).append(r)
+        mu, sd = source_stats(D)
+        mu = {k: v.to(DEV) for k, v in mu.items()}; sd = {k: v.to(DEV) for k, v in sd.items()}
         nW = len(CHAR_T)
     lr = 5e-5 if cycle else 2e-4
     opt = torch.optim.AdamW([p for p in con.parameters() if p.requires_grad], lr=lr, weight_decay=0.01, betas=(0.9, 0.99))
@@ -94,7 +95,7 @@ def train(W, run, steps, minutes, cycle=False):
         con.train(); return [round(float(v[a:a + n3].mean()), 4) for a in (0, n3, 2 * n3)]
 
     g = torch.Generator().manual_seed(1 if not cycle else 2)
-    B, BC, LAM, TAU = (16, 0, 0, 0) if not cycle else (8, 4, 0.1, 0.05)
+    B, BC, LAM = (16, 0, 0) if not cycle else (8, 4, 0.25)
     B, BC = int(os.environ.get('VLENS_B', B)), int(os.environ.get('VLENS_BC', BC))
     hist = [dict(step=0, val=val())]; log(tag, 'step 0 val see/inj/hold', hist[0]['val'])
     preview(K, con, D, W, run / f'preview_{tag}_0000.jpg')
@@ -110,23 +111,20 @@ def train(W, run, steps, minutes, cycle=False):
             kinds, A2, img2, row2 = draw_batch(D, BC, g, (0.3, 0.2, 0.3, 0.2))
             with torch.autocast('cuda', dtype=BF, enabled=DEV == 'cuda'):
                 C2 = con(A2.to(DEV))
-            r = R.see(K.decode(K.sample(C2, torch.randn(BC, K.h * K.h, 128, generator=g).to(DEV))).clamp(-1, 1))
-            q = F.normalize(r - mu_see, dim=-1)                                     # the readback, centered by the see mean
-            ces, hits = [], []
-            for b in range(BC):
-                k = KINDS[int(kinds[b])]; Bk, dead = bank[k]; t = int(row2[b])
-                lg = (q[b:b + 1].to(BF) @ Bk.T).float()[0].masked_fill(dead, -1e4)
-                other = [x for x in same_img[int(img2[b])] if x != t] if k == 'hold' else [x for x in range(t - t % nW, t - t % nW + nW) if x != t] if k == 'char' else []
-                if other:
-                    lg[torch.tensor(other, device=DEV)] = -1e4
-                ces.append(F.cross_entropy(lg[None] / TAU, torch.tensor([t], device=DEV))); hits.append(float(lg.argmax() == t))
-            cyc_t = torch.stack(ces).mean(); loss = loss + LAM * cyc_t; cyc = float(cyc_t); acc = float(np.mean(hits))
+            x = K.decode(K.sample(C2, torch.randn(BC, K.h * K.h, 128, generator=g).to(DEV))).clamp(-1, 1)
+            errs, fves = [], []
+            for b in range(BC):                                                    # read back in the source's own context
+                k = KINDS[int(kinds[b])]; t = int(row2[b])
+                w = HOLD_TR[int(tr['hold_items'][t, 2])] if k == 'hold' else CHAR_T[t % nW] if k == 'char' else None
+                zr = (R.readback(x[b:b + 1], k, w)[0] - mu[k]) / sd[k]; za = (A2[b].float().to(DEV) - mu[k]) / sd[k]
+                e = ((zr - za) ** 2).sum(); errs.append(e / zr.numel()); fves.append(1 - float(e) / float((za ** 2).sum()))
+            rec = torch.stack(errs).mean(); loss = loss + LAM * rec; cyc = float(rec); acc = float(np.mean(fves))
         opt.zero_grad(set_to_none=True); loss.backward()
         torch.nn.utils.clip_grad_norm_(con.parameters(), 1.0); opt.step(); sched.step()
         run_l.append((float(loss), cyc, acc))
         if step % 50 == 0:
             m = np.mean(run_l, 0); run_l = []
-            log(tag, 'step', step, 'loss', round(m[0], 4), 'cycle ce', round(m[1], 3), 'cycle top1', round(m[2], 3), 'lr', f'{sched.get_last_lr()[0]:.2e}')
+            log(tag, 'step', step, 'loss', round(m[0], 4), 'readback mse', round(m[1], 4), 'readback fve', round(m[2], 4), 'lr', f'{sched.get_last_lr()[0]:.2e}')
         last = step == steps or time.monotonic() > t_end
         if step % 500 == 0 or last:
             hist.append(dict(step=step, val=val())); log(tag, 'step', step, 'val see/inj/hold', hist[-1]['val'])

@@ -18,9 +18,13 @@ gets no prompt and no word embeddings. A small trained adapter computes klein's 
      prompt, one constant);
    - a zero-initialized per-channel gate also passes the raw activation through.
 3. **Picture.** Klein (frozen) runs its own 4-step Euler sampler at 384 px from that conditioning.
-4. **Readback.** Qwen3-VL is shown the picture with the same instruction it used when it saw a real photo. Its
-   activation is compared with the source activation by cosine similarity, after each context's mean activation is
-   subtracted (one fixed vector per context). No probe or readout is fitted.
+4. **Readback.** Qwen3-VL reads the picture in the same context the source activation came from, with the picture in
+   place of the content:
+   - a caption chat "Picture this scene in your mind: {caption} ..." becomes "... in your mind: [picture] ...";
+   - a character chat "You are {x}. ..." becomes "You are [picture]. ...".
+
+   The new activation is compared with the source activation directly, after standardizing each dimension by its
+   training mean and spread (fixed constants). No probe or readout is fitted.
 
 ## Sources of activations
 
@@ -41,18 +45,22 @@ gets no prompt and no word embeddings. A small trained adapter computes klein's 
 
   Klein can only denoise well if the conditioning says what the photo is, so the adapter must carry the photo's
   content from the activation.
-- **Stage C (NLA style, unsupervised readback added).** The adapter makes a picture through klein's 4 sampling
-  steps and the VAE decoder, and Qwen3-VL reads it; gradients flow through all of these.
-  - A contrastive loss (temperature 0.05) asks the readback to be nearest its own source among all training sources
-    of that kind (90k photos, 120k captions, 720 character chats).
-  - This loss needs no photo, so character activations train on it alone.
+- **Stage C (NLA style, unsupervised reconstruction added).** The adapter makes a picture through klein's 4 sampling
+  steps and the VAE decoder, and Qwen3-VL reads it back in the source's own context; gradients flow through all of
+  these.
+  - The loss is the mean squared error between the standardized readback and source activations: the picture must
+    let the model rebuild its own activation.
+  - This loss needs no photo or label, so character activations train on it alone.
   - The stage B loss stays on, to keep pictures natural and to limit hiding information in pixel patterns that only
     the reader decodes.
 
 ## Evaluation
 
 - **Test sets.** 1,000 held-out photos (500 COCO, 500 CC3M) under 4 sources, plus 60 held-out characters.
-- **Readback rank.** The source's rank among all 1,000 sources, using the reader's own activations.
+- **Reconstruction.** Fraction of variance explained between the readback and the source activation (standardized).
+  Two references: the real photo read back in the same context (how much any picture could explain), and shuffled
+  pairs (no item information).
+- **Readback rank.** The source's rank among all 1,000 sources.
 - **SigLIP 2 rank.** The real photo's rank among the 1,000 real photos by SigLIP 2 (so400m/16-512) image-image
   similarity. No stage trains on this scorer.
 - **Text route.** Klein given the caption as an ordinary prompt: the text-bottleneck reference.

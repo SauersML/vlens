@@ -11,12 +11,13 @@ CC3M (web images: products, art, illustrations, people, text). Sources:
 Generator: FLUX.2 [klein] 4B, frozen, 4 sampling steps at 384 px. No prompt and no word vectors go to it: its whole
 conditioning (M=64 tokens of 7,680) is computed from the activation by a trained adapter ("connector").
   stage B (oracle style)  klein's own flow-matching loss on the real photo (see, inj, hold sources).
-  stage C (NLA style)     + an autoencoder loss: activation -> picture (4 differentiable sampling steps) -> Qwen3-VL sees
-                          the picture -> activation; contrastive, so the readback is nearest its own source among all
-                          training sources of that kind (cosine after subtracting the kind's mean activation, a
-                          constant). No probe or readout is fitted; needs no photo (characters train on it alone).
+  stage C (NLA style)     + an autoencoder loss: activation -> picture (4 differentiable sampling steps) -> Qwen3-VL reads
+                          the picture in the source's own context, the picture in place of the content -> activation;
+                          mean squared error against the source after standardizing each dimension (fixed constants).
+                          No probe or readout is fitted; needs no photo (characters train on it alone).
   eval  1,000 held-out photos (500 COCO, 500 CC3M) x 4 sources, 60 held-out characters, 60 random activations (same
-        per-dimension mean and spread: the prior control); direct readback ranks; SigLIP 2 image-image ranks against
+        per-dimension mean and spread: the prior control); fraction of variance explained with the real photo read back
+        the same way as the ceiling and shuffled pairs as the floor; readback ranks; SigLIP 2 image-image ranks against
         the real photos (a scorer no stage trained on); the text route (klein given the caption) as the reference.
 Usage: python -m vlens ... (vlens/__main__.py, scripts/run_all.sh)"""
 __version__ = "0.1.0"

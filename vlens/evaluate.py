@@ -1,4 +1,6 @@
-"""Evaluation: pictures from held-out sources, direct readback ranks, SigLIP 2 image-image ranks, text route and prior control."""
+"""Evaluation: pictures from held-out sources; reconstruction (fraction of variance explained) with each picture read back in its
+source's own context, against the real photo read back the same way (ceiling) and shuffled pairs (floor); readback ranks;
+SigLIP 2 image-image ranks; the text route and the random-activation prior control."""
 from .common import *
 from .models import Reader, Klein
 from .train import load_data, make_connector, test_idx
@@ -21,8 +23,6 @@ def evaluate(W, run):
     D = load_data(W); te, tr = D['te'], D['tr']
     good = test_idx(D, 2 * N_TE); n = len(good); nte = len(te['see'])
     is_coco = (te['src'][good] == 0)
-    mu = dict(see=tr['see'][D['tr_img']].float().mean(0), inj=tr['inj'][D['tr_img']].float().mean(0),
-              hold=tr['hold'][D['tr_hold']].float().mean(0), char=D['char']['A_tr'].float().mean(0))
     allA = torch.cat([tr['see'][D['tr_img']], tr['inj'][D['tr_img']], tr['hold'][D['tr_hold']]])
     allA = allA[torch.randperm(len(allA), generator=torch.Generator().manual_seed(0))[:30000]].float()
     g = torch.Generator().manual_seed(11)
@@ -30,7 +30,6 @@ def evaluate(W, run):
     rand = allA.mean(0) + allA.std(0) * torch.randn(NX, allA.shape[1], generator=g)    # the prior control
     srcs = dict(see=te['see'][good], inj=te['inj'][good], holdT1=te['hold'][good], holdT2=te['hold'][nte + good],
                 char=D['char']['A_te'][::len(CHAR_T)][:NX], random=rand.half())
-    kind = dict(see='see', inj='inj', holdT1='hold', holdT2='hold', char='char', random=None)
     K = Klein(); pics = {}
     for tag in ('B', 'C'):
         p = W / f'con_{tag}.pt'
@@ -62,26 +61,48 @@ def evaluate(W, run):
     for name, P in pics.items():
         for k in range(len(P)):
             Image.fromarray(P[k].permute(1, 2, 0).numpy()).resize((256, 256), Image.BICUBIC).save(run / 'pics' / f'{name}_{k}.jpg', quality=82)
-    R = Reader(); readback = {}
+    # which source each picture set came from and the context its readback uses (the picture in place of the content)
+    ctx = {}
+    for name in pics:
+        s_ = name.split('_', 1)[1]
+        s_ = dict(caption='holdT1').get(s_, s_)
+        ctx[name] = (s_, dict(see=('see', None), inj=('inj', None), holdT1=('hold', HOLD_TE[0]), holdT2=('hold', HOLD_TE[1]),
+                              char=('char', CHAR_T[0]), random=('see', None))[s_])
+    for s_ in ('inj', 'holdT1', 'holdT2'):                                # ceiling: the real photo read back the same way
+        pics[f'real_{s_}'] = real; ctx[f'real_{s_}'] = (s_, dict(inj=('inj', None), holdT1=('hold', HOLD_TE[0]), holdT2=('hold', HOLD_TE[1]))[s_])
+    R = Reader(); rb_m, rb_see = {}, {}
     with torch.no_grad():
         for name, P in pics.items():
-            readback[name] = torch.cat([R.see(P[i:i + 32].float().div(127.5).sub(1)).cpu() for i in range(0, len(P), 32)])
+            kd, w = ctx[name][1]
+            rb_m[name] = torch.cat([R.readback(P[i:i + 32].float().div(127.5).sub(1), kd, w).cpu() for i in range(0, len(P), 32)])
+            if kd != 'see' and not name.startswith('real_'):
+                rb_see[name] = torch.cat([R.see(P[i:i + 32].float().div(127.5).sub(1)).cpu() for i in range(0, len(P), 32)])
+            else:
+                rb_see[name] = rb_m[name]
     del R; torch.cuda.empty_cache()
+    from .train import source_stats
+    mu, sd = source_stats(D); mu['random'], sd['random'] = allA.mean(0), allA.std(0) + 1e-3
+
+    def recon(zr, za):
+        err = ((zr - za) ** 2).sum(1); tot = (za ** 2).sum(1); errp = ((zr - za.roll(1, 0)) ** 2).sum(1)
+        return dict(n=len(za), fve=round(float(1 - err.sum() / tot.sum()), 4), fve_shuffled_pairs=round(float(1 - errp.sum() / tot.sum()), 4),
+                    cos=round(float(F.cosine_similarity(zr, za).mean()), 4))
     res, per = {}, {}
-    see_c = srcs['see'].float() - mu['see']
-    for name, rb in readback.items():
-        q = rb - mu['see']; s = name.split('_', 1)[1]; res[name] = {}; per[name] = {}
-        if s in ('char', 'random'):
-            own = srcs[s].float() - (mu[kind[s]] if kind[s] else srcs[s].float().mean(0))
-            r = ranks(q, own, torch.arange(len(q))); res[name]['readback vs own sources'] = summary(r); per[name]['source'] = r
-            continue
-        if name == 'text_caption':
-            s = 'holdT1'
-        r = ranks(q, see_c, torch.arange(n)); per[name]['photo'] = r
-        res[name]['readback vs real-photo activations'] = dict(all=summary(r), coco=summary(r[is_coco]), cc3m=summary(r[~is_coco]))
-        if kind[s] != 'see':
-            r = ranks(q, srcs[s].float() - mu[kind[s]], torch.arange(n)); per[name]['source'] = r
-            res[name]['readback vs own sources'] = dict(all=summary(r), coco=summary(r[is_coco]), cc3m=summary(r[~is_coco]))
+    see_c = (srcs['see'].float() - mu['see']) / sd['see']
+    for name in pics:
+        s_, (kd, w) = ctx[name]; kk = dict(holdT1='hold', holdT2='hold').get(s_, s_); res[name] = {}; per[name] = {}
+        zr, za = (rb_m[name] - mu[kk]) / sd[kk], (srcs[s_].float() - mu[kk]) / sd[kk]
+        r = ranks(zr, za, torch.arange(len(za))); per[name]['source'] = r
+        if len(za) == n:
+            res[name]['reconstruction (readback in the source context, standardized)'] = dict(all=recon(zr, za), coco=recon(zr[is_coco], za[is_coco]), cc3m=recon(zr[~is_coco], za[~is_coco]))
+            res[name]['readback rank among the sources'] = dict(all=summary(r), coco=summary(r[is_coco]), cc3m=summary(r[~is_coco]))
+            if not name.startswith('real_'):
+                r2 = ranks((rb_see[name] - mu['see']) / sd['see'], see_c, torch.arange(n)); per[name]['photo'] = r2
+                res[name]['seen-picture readback rank among real-photo activations'] = dict(all=summary(r2), coco=summary(r2[is_coco]), cc3m=summary(r2[~is_coco]))
+        else:
+            res[name]['reconstruction (readback in the source context, standardized)'] = recon(zr, za)
+            res[name]['readback rank among the sources'] = summary(r)
+    readback = rb_m
     from transformers import AutoModel, AutoProcessor
     root = snap(SIGLIP); sm = AutoModel.from_pretrained(root, dtype=torch.float16).to(DEV).eval(); sp = AutoProcessor.from_pretrained(root)
 
@@ -95,10 +116,12 @@ def evaluate(W, run):
         return torch.cat(f)
     fr = sig_f(real); feats = dict(real=fr)
     for name, P in pics.items():
+        if name.startswith('real_'):
+            continue
         feats[name] = sig_f(P)
         if len(P) == n:
             r = ranks(feats[name], fr, torch.arange(n)); per[name]['siglip'] = r
             res[name]['SigLIP 2 picture vs real photos'] = dict(all=summary(r), coco=summary(r[is_coco]), cc3m=summary(r[~is_coco]))
     json.dump(dict(n=n, results=res), open(run / 'eval.json', 'w'), indent=1)
-    save(dict(per=per, good=good, readback=readback, src=srcs, mu=mu, siglip=feats, chars=D['char']['te']), run / 'eval_rows.pt')
+    save(dict(per=per, good=good, readback=rb_m, readback_see=rb_see, src=srcs, mu=mu, sd=sd, siglip=feats, chars=D['char']['te']), run / 'eval_rows.pt')
     log(json.dumps(res, indent=1))
