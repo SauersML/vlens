@@ -61,16 +61,16 @@ def ridge(X, Y):
     mu, sd = X.float().mean(0), X.float().std(0) + 1e-3; ym = Y.float().mean(0)
     Xs = ((X.float() - mu) / sd).to(DEV); Yc = (Y.float() - ym).flatten(1).to(DEV)
 
-    def fit(idx):
-        ev, V = torch.linalg.eigh((Xs[idx].T @ Xs[idx]).double()); ev, V = ev.float(), V.float()
-        B = V.T @ (Xs[idx].T @ Yc[idx])
+    def fit(m):                                                       # first m rows (views, no copies)
+        ev, V = torch.linalg.eigh((Xs[:m].T @ Xs[:m]).double()); ev, V = ev.float(), V.float()
+        B = V.T @ (Xs[:m].T @ Yc[:m])
         return lambda lam: V @ (B / (ev + lam)[:, None])
-    va = torch.arange(n - v, n)
-    f = fit(torch.arange(n - v)); fve = {}
+    va = slice(n - v, n)
+    f = fit(n - v); fve = {}
     for lam in LAMS:
         err = ((Xs[va] @ f(lam) - Yc[va]) ** 2).sum(); fve[lam] = 1 - float(err) / float((Yc[va] ** 2).sum())
     del f
-    best = max(fve, key=fve.get); W = fit(torch.arange(n))(best)
+    best = max(fve, key=fve.get); W = fit(n)(best)
     del Xs, Yc; torch.cuda.empty_cache()
     return (lambda A: (((A.float() - mu) / sd).to(DEV) @ W).view(len(A), *Y.shape[1:]).cpu() + ym), best, fve
 
@@ -93,10 +93,9 @@ def qimg(out, n_train=6000):
         pics[name] = []
         for i in range(len(P)):
             p = Q.picture(torch.cat([pre, P[i].to(DEV, BF)]), SEED); pics[name].append(p)
-            if i < N_SHOW:
-                p.save(out / 'pics' / f'{name}_{i}.jpg', quality=90)
+            p.save(out / 'pics' / f'{name}_{i}.jpg', quality=90 if i < N_SHOW else 80)
         log('drew', name, len(P))
-    for i in range(N_SHOW):
+    for i in range(len(te['ims'])):
         te['ims'][i].save(out / 'pics' / f'photo_{i}.jpg', quality=90)
     from transformers import AutoModel, AutoProcessor
     root = snap(SIGLIP); sm = AutoModel.from_pretrained(root, dtype=torch.float16).to(DEV).eval(); sp = AutoProcessor.from_pretrained(root)
@@ -108,14 +107,16 @@ def qimg(out, n_train=6000):
             o = sm.get_image_features(pixel_values=sp(images=ims[i:i + 32], return_tensors='pt')['pixel_values'].to(DEV).half())
             f.append(F.normalize((o if torch.is_tensor(o) else o.pooler_output).float(), dim=-1).cpu())
         return torch.cat(f)
-    real = sig(te['ims']); see_c = te['see'].float() - tr['see'].float().mean(0)
-    res['scores'] = {}
+    mu, sd = tr['see'].float().mean(0), tr['see'].float().std(0) + 1e-3     # readback compared standardized
+    real = sig(te['ims']); see_z = (te['see'].float() - mu) / sd
+    res['scores'] = {}; RB = {}
     for name, P in pics.items():
         with torch.no_grad():
             rb = torch.cat([R.see(to_t([square(p) for p in P[i:i + 32]])).cpu() for i in range(0, len(P), 32)])
         res['scores'][name] = dict(siglip=summary(ranks(sig(P), real)),
-                                   readback=summary(ranks(rb - tr['see'].float().mean(0), see_c)))
-        log(name, res['scores'][name])
+                                   readback=summary(ranks((rb - mu) / sd, see_z)))
+        log(name, res['scores'][name]); RB[name] = rb.half()
+    save(dict(readback=RB, see=te['see'], inj=te['inj'], hold=te['hold'], mu=mu, sd=sd, siglip_real=real), out / 'qimg_rows.pt')
     cols = ['photo'] + list(pics); S = 256
     Gd = Image.new('RGB', (len(cols) * S, N_SHOW * S), 'white')
     for r in range(N_SHOW):
