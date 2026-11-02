@@ -140,6 +140,34 @@ characters (chance 4%, 4% and 8%).
 Every klein connector before this (flow matching on the distilled or the base model, end-to-end DINOv2 through the
 4 steps, a direct linear path) learned one conditioning for every activation.
 
+## Trained through the generator (`vlens pnla`)
+
+`vlens pnla` starts at the ridge map (kept at rank 1024) and trains a residual on top of it (an MLP of the
+standardized activation whose output layer starts at zero, plus the mean state) through the frozen generator, with
+the same 100 test photos, seed and size as above.
+
+![trained through the generator](docs/pnla_see.png)
+
+| 4B source, loss (65 min on one A100) | SigLIP top-1 | top-5 | readback top-1, offset removed | best of 4 by readback |
+|---|---|---|---|---|
+| sees the photo, ridge map (start) | 33% | 72% | 11% | |
+| sees the photo, Turbo's flow-matching loss on the photo | 55% | 89% | 30% | 58% |
+| reads a caption, ridge map (start) | 22% | 50% | 11% | |
+| reads a caption, Turbo's flow-matching loss on the photo | 15% | 44% | 10% | 17% |
+
+From the see chat the trained pictures match the photos' layout and colour far better than the 8B's own states do
+(43%), and the 4B reads them back closer to its own activation though readback was never trained. They are softer
+than the ridge map's pictures and sometimes blend objects. From a caption the same training washes the pictures out
+into blended, ghostly scenes: Turbo is distilled, so the condition that minimizes its denoising loss draws an average
+of the plausible pictures, and a caption allows many. Runs that take the loss from the undistilled base model
+(Qwen/Qwen-Image-2.1), with Turbo still drawing, are in progress.
+
+Two readback losses failed. The direct one (the picture from one sampler step, decoded and read back, InfoNCE against
+4,096 train sources, weight 0.3 beside the photo loss) stayed at chance for 400 steps while its gradient, 40 times the
+photo loss's, pushed the photo loss up (0.45 to 0.49); stopped. Self-distillation with no photo (four pictures per
+source, the one read back closest kept, flow matching on it) cut the quick eval from 38% to 16% top-1 in 100 steps
+while the mean readback similarity fell; stopped.
+
 ## A picture lens across depth (`vlens depth`)
 
 A tuned lens with a picture as the readout. For each layer L of Qwen3-VL-8B, a ridge map carries the layer-L state at
