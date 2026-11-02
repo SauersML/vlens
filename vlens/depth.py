@@ -46,7 +46,7 @@ SETS = os.environ.get('VLENS_DEPTH_SETS', 'photos,think,hop').split(',')
 RAW = tuple(int(x) for x in os.environ.get('VLENS_DEPTH_RAW', '28').split(','))
 FIT_THINK = os.environ.get('VLENS_DEPTH_FIT_THINK') == '1'
 RAW_ONLY = os.environ.get('VLENS_DEPTH_RAW_ONLY') == '1'
-SEED, N_EVAL = 11, int(os.environ.get('VLENS_DEPTH_EVAL', 16))
+SEED, N_EVAL = int(os.environ.get('VLENS_DEPTH_SEED', 11)), int(os.environ.get('VLENS_DEPTH_EVAL', 16))
 TAIL = " Don't name it or describe it. Just reply OK."
 VIVID = 'Strongly visually imagine {x}: see it in vivid detail, its shapes, colors and setting, and hold that picture in mind.'
 SETUP = ('Here is how this works. An image generator, Qwen-Image-2.1, reads your internal states at one of your later layers, '
