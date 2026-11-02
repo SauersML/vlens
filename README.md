@@ -180,7 +180,9 @@ never reads the words. 48 answers are each named ("Think of the Mona Lisa.") and
 most famous painting by Leonardo da Vinci."). A picture is scored by the SigLIP 2 rank of its label among the 48
 (chance 2%).
 
-![two-step descriptions across depth](docs/depth_two_step.png)
+![two-step descriptions drawn from each layer's own states](docs/depth_own_states.png)
+
+Six two-step answers that the last layer loses, drawn from each layer's own states with no map.
 
 | top-1 among 48, by layer | 8 | 12 | 16 | 20 | 24 | 26 | 28 | 30 | 32 | 34 | 36 (last) |
 |---|---|---|---|---|---|---|---|---|---|---|---|
