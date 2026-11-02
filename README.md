@@ -130,24 +130,26 @@ A tuned lens with a picture as the readout. For each layer L of Qwen3-VL-8B, a r
 a position to the last-layer state at the same position (fit on 137,601 token pairs from 4,000 contexts, photos and
 captions; held-out fit 0.89 at layer 4 to 0.96 at layer 32). The untouched Qwen-Image-2.1-Turbo then draws the mapped
 states. Prompts are "Think of X. Don't name it or describe it. Just reply OK.", and only the positions after "X." are
-drawn, so the generator never reads the words. A picture is scored by the SigLIP 2 rank of its label among the set's
-16 labels (chance 6%).
+drawn, so the generator never reads the words. 48 answers are each named ("Think of the Mona Lisa.") and described in
+two steps ("Think of the most famous painting by Leonardo da Vinci."). A picture is scored by the SigLIP 2 rank of its
+label among the 48 (chance 2%).
 
-| top-1 among 16, by layer | 4 | 8 | 12 | 16 | 20 | 24 | 28 | 32 | 36 (last) |
-|---|---|---|---|---|---|---|---|---|---|
 ![two-step descriptions across depth](docs/depth_two_step.png)
 
-| X named ("Think of a tiger.") | 6% | 19% | 44% | 19% | 19% | 25% | 75% | 69% | 50% |
-| X described in two steps ("the most famous painting by Leonardo da Vinci") | 13% | 6% | 13% | 6% | 13% | 19% | 25% | 38% | 25% |
-| photos seen with the see prompt (rank among the 16 photos) | 13% | 38% | 63% | 31% | 44% | 50% | 63% | 56% | 56% |
+| top-1 among 48, by layer | 8 | 12 | 16 | 20 | 24 | 26 | 28 | 30 | 32 | 34 | 36 (last, no map) | 28, no map |
+|---|---|---|---|---|---|---|---|---|---|---|---|---|
+| named | 2% | 15% | 4% | 6% | 6% | 27% | 44% | 56% | 54% | 56% | 46% | 67% |
+| described in two steps | 10% | 10% | 8% | 6% | 17% | 23% | 29% | 38% | 35% | 35% | 31% | 33% |
 
-Named objects are drawable from layer 12 for some items (a tiger from layer 12 on) and for most at layers 28-32,
-more than at the last layer, where the empty-state picture (a robed statue) often returns. Two-step descriptions
-resolve later: the Mona Lisa and the Statue of Liberty appear first at layer 28; Jimi Hendrix's instrument is a man
-with a saxophone at layers 20-24 and an electric guitar at 28-32; the Nemo description draws a peacock through layer
-24, a blue fish at 28 and a clownfish at 32. Layer 28's raw states drawn
-with no map are a control: 13% on photos, but 56% on named objects. A run with 48 answers, each named and described,
-at every second layer is in progress.
+Both kinds become drawable at about the same depth, from layer 26-28 on, and stay more drawable at layers 30-34 than
+at the last layer, where the empty-state picture (a robed statue) often returns. Two-step answers are drawn less
+often, not later: 27 of 48 named answers and 17 of 48 two-step answers stay top-1 from some layer through layer 34,
+and for the 15 answers that do both, the two-step one arrives 0.4 layers later on average (95% bootstrap interval -1.9
+to 2.4). Single examples look like a sequence (Jimi Hendrix's instrument is a man with a saxophone at layers 20-24 and
+an electric guitar at 28-32; the Nemo description draws a peacock through layer 24, a blue fish at 28 and a clownfish
+at 32), but the paired counts do not show two-step answers forming later. Layer 28's states drawn with no map beat
+every mapped layer on named objects (67%) but not on photos (25% against 50% mapped), so the maps, fit on photo and
+caption positions, lose part of what these positions hold.
 
 ## Run
 
