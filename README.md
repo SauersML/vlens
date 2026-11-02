@@ -81,6 +81,21 @@ gets no prompt and no word embeddings. A small trained adapter computes klein's 
 - **Prior control.** Random activations with the same per-dimension mean and spread as real ones. If these also
   produce confident, meaningful scenes, the pictures reflect klein's prior rather than Qwen's state.
 
+## A real LLM's own states, no training (`vlens native`)
+
+Qwen-Image-2.1 (Alibaba, September 2026) generates pictures from the last-layer states of Qwen3-VL-8B, and its encoder
+is the public Qwen3-VL-8B-Instruct checkpoint (checked tensor by tensor). So no adapter is needed:
+Qwen3-VL-8B reads a blank prompt while its states are changed from the inside, and Qwen-Image-2.1-Turbo renders them.
+- **Concept steering:** + a multiple of a concept direction after layer 18 (mean state of photos whose captions name
+  the concept minus the mean over all photos).
+- **Neuron steering:** + 10, 20 or 40 standard deviations on the single MLP neuron of layer 18 that best separates
+  those photos; random neurons at the same strength are the control.
+- **Transplant:** the states of the last 5 positions while Qwen3-VL-8B looks at a real photo, copied into the blank
+  prompt after layer 8 or 18.
+
+Every picture in a row uses the same noise. Qwen3-VL-8B is also asked, in the same steered state, what it is thinking
+about.
+
 ## Run
 
 ```
