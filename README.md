@@ -248,10 +248,18 @@ in the adapter.
 
 With half the training captions worded like the thought prompts ("Think of this: {caption} Don't name it or describe
 it. Just reply OK."), the "Think of X" prompts give the right object top-1 among 24 for 79% (plain ranks 71%), against
-38% (29%) for the ridge map and 54% (38%) for the same training in the caption wordings only. The figure shows all 24
-in order. Riddles, a wording never trained, do not improve (25% against 33%), and many of the 24 objects are common
-COCO subjects (giraffe, zebra, pizza, train). Hidden-thought ranks here are over labels with each label's offset
-removed, as in the depth lens below.
+38% (29%) for the ridge map and 54% (38%) for the same training in the caption wordings only. Riddles, a wording
+never trained, do not improve (25% against 33%), and many of the 24 objects are common COCO subjects (giraffe, zebra,
+pizza, train). Hidden-thought ranks here are over labels with each label's offset removed, as in the depth lens below.
+
+The figure uses 32 new thoughts instead (`THINK_MORE`, drawn with `VLENS_PNLA_EXPLORE_ONLY=1`): four plain objects as
+a check, then how the model pictures itself, surreal scenes, fears and fun prompts; it shows 18 of them. Among the 32
+labels the right one is top-1 for 38% (plain ranks 22%), against 12.5% (9%) for the ridge map; chance is 3%. Plain
+objects come out right. The self prompts draw people, and "the person who created you" a skull on a stand. Surreal
+compositions collapse to one ordinary subject (the cat made of spaghetti is a puppy), and abstract ones to rooms and
+people. The adapter was trained only on COCO captions, which may be the limit rather than the 4B; `vlens layers`
+checks which 4B layer to read, and the untrained lens below draws the same 32 thoughts from Qwen3-VL-8B
+(`VLENS_DEPTH_SETS=more,words`).
 
 Training on the adapter's own drawing path for every other caption (Turbo's velocity under the caption text as the
 target at the points the adapter itself reaches, against drift off the path) changed little in the same 100 minutes:
@@ -307,6 +315,7 @@ pip install -e .
 python -m vlens depth OUT [N_FIT]        # picture lens across Qwen3-VL-8B's layers (VLENS_DEPTH_SETS, _LAYERS, _RAW)
 python -m vlens swap OUT                 # faithfulness: one thought mixed into another, pictures against the answer
 python -m vlens qimg OUT [N_TRAIN]       # ridge maps from Qwen3-VL-4B's activation to Qwen-Image-2.1's input
+python -m vlens layers OUT [N_TRAIN]     # which Qwen3-VL-4B layer to read: one ridge map per layer in VLENS_READ
 python -m vlens pnla OUT MAPS [N_TRAIN]  # adapter trained through the generator
 python -m vlens native OUT               # Qwen3-VL-8B's own states: photos, steering
 ```
