@@ -11,12 +11,17 @@ gets no prompt and no word embeddings. A small trained adapter computes klein's 
 
 1. **Activation.** Qwen3-VL's residual stream after decoder layers 9, 18 and 27 (pre-norm), taken at the last
    position of the reply start and concatenated: 3 x 2560 = 7,680 numbers.
-2. **Adapter.** A MetaQuery-style connector maps that vector to 64 conditioning tokens of size 7,680:
-   - the standardized activation becomes 8 tokens;
-   - 64 learned queries attend to them through a 4-layer transformer;
-   - a zero-initialized projection writes the result on top of klein's blank conditioning (the encoding of an empty
-     prompt, one constant);
-   - a zero-initialized per-channel gate also passes the raw activation through.
+2. **Adapter.** It maps that vector to 64 conditioning tokens of size 7,680, written on top of klein's blank
+   conditioning (the encoding of an empty prompt, one constant), as the sum of three parts:
+   - a free bias, which carries whatever all pictures share;
+   - a direct path that is linear in the standardized activation with no biases (activation -> 1,024 -> 64 tokens of
+     256 -> 7,680 per token, last layer zero-initialized). It averages exactly zero over training items, so it can only
+     carry what differs between them and every gradient it gets is item-specific;
+   - a MetaQuery-style path for nonlinear structure: the activation becomes 8 tokens, 64 learned queries attend to them
+     through a 4-layer transformer, and a zero-initialized projection writes the result.
+
+   The first version had only the MetaQuery path. Its outputs for different activations pointed 92% in the same
+   direction, and with every loss tried it learned one shared conditioning that ignored the activation.
 3. **Picture.** Klein (frozen) runs its own 4-step Euler sampler at 384 px from that conditioning.
 4. **Readback.** Qwen3-VL reads the picture in the same context the source activation came from, with the picture in
    place of the content:

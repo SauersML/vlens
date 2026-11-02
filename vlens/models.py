@@ -184,25 +184,32 @@ class Klein:
 
 
 class Connector(nn.Module):
-    """activation [B, din] -> klein conditioning [B, M, dout]. MetaQuery-style: the standardized activation becomes P
-    tokens, M learned queries attend to them through a small transformer, a zero-initialized projection writes the
-    result on top of klein's blank conditioning (encoding of an empty prompt, a constant), plus a zero-initialized
-    per-channel gate on the raw activation (source and klein's encoder are both Qwen3 layers 9/18/27 concatenated)."""
-    def __init__(self, din, q0, mu, sd, d=768, P=8, layers=4, heads=12):
+    """activation [B, din] -> klein conditioning [B, M, dout] = q0 + delta + mixer(a) + direct(a).
+    q0: klein's blank conditioning (encoding of an empty prompt, a constant); delta: a free [M, dout] bias that carries
+    whatever all pictures share. direct: linear in the standardized activation z (no biases), so it is exactly zero
+    on average over training items and carries only what differs between them; every gradient it gets is
+    item-specific. z -> rank-R mix -> M tokens of size r -> a shared per-token projection to dout (zero-initialized).
+    mixer: the MetaQuery-style path (z -> P tokens, M learned queries attend through a small transformer,
+    zero-initialized output) for nonlinear structure. The first version had only the mixer: outputs for different
+    items were 92% the same direction (the learned queries dominate), and every loss trained one shared conditioning."""
+    def __init__(self, din, q0, mu, sd, d=768, P=8, layers=4, heads=12, R=1024, r=256):
         super().__init__()
-        dout = q0.shape[-1]; self.P = P
+        dout = q0.shape[-1]; self.P, self.r = P, r
         self.register_buffer('mu', mu.float()); self.register_buffer('sd', sd.float())
+        self.register_buffer('q0', q0.float().clone()); self.delta = nn.Parameter(torch.zeros_like(q0.float()))
+        self.drop = nn.Dropout(0.1)
+        self.d1 = nn.Linear(din, R, bias=False); self.d2 = nn.Linear(R, len(q0) * r, bias=False); self.d3 = nn.Linear(r, dout, bias=False)
+        nn.init.normal_(self.d1.weight, std=din ** -0.5); nn.init.normal_(self.d2.weight, std=R ** -0.5); nn.init.zeros_(self.d3.weight)
         self.inp = nn.Sequential(nn.Linear(din, 1536), nn.GELU(), nn.Linear(1536, P * d))
         self.pos = nn.Parameter(0.02 * torch.randn(P, d)); self.qry = nn.Parameter(0.02 * torch.randn(len(q0), d))
         self.enc = nn.TransformerEncoder(nn.TransformerEncoderLayer(d, heads, 4 * d, dropout=0.0, activation='gelu', batch_first=True, norm_first=True),
                                          layers, enable_nested_tensor=False)
         self.norm = nn.LayerNorm(d); self.out = nn.Linear(d, dout)
         nn.init.zeros_(self.out.weight); nn.init.zeros_(self.out.bias)
-        self.q0 = nn.Parameter(q0.float().clone()); self.beta = nn.Parameter(torch.zeros(dout))
-        self.drop = nn.Dropout(0.1)
 
     def forward(self, a):
         a = a.float(); z = self.drop((a - self.mu) / self.sd)
+        direct = self.d3(self.d2(self.d1(z)).view(len(a), -1, self.r))
         t = self.inp(z).view(len(a), self.P, -1) + self.pos
         h = self.enc(torch.cat([t, self.qry.expand(len(a), -1, -1)], 1))[:, self.P:]
-        return self.q0 + self.out(self.norm(h)) + (self.beta * a[:, None] if a.shape[1] == self.beta.shape[0] else 0)
+        return self.q0 + self.delta + direct + self.out(self.norm(h))
