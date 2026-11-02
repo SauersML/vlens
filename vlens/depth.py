@@ -13,8 +13,10 @@ Sets:
           World's Fair"); ranked among the answers' labels
   direct, twostep   the same 48 answers (PAIRS) named (direct) or described (twostep), each ranked among the 48 labels;
           per-item ranks are kept, so the first layer at which each answer is drawn can be compared within the pair
-  raw     the layer-RAW_L states drawn with no map (control: is the map needed?)
-VLENS_DEPTH_LAYERS (comma list) and VLENS_DEPTH_SETS (default photos,think,hop) choose the layers and sets.
+  raw     layer-L states drawn with no map, for L in VLENS_DEPTH_RAW (default 28; control: is the map needed?)
+VLENS_DEPTH_LAYERS (comma list) and VLENS_DEPTH_SETS (default photos,think,hop) choose the layers and sets;
+VLENS_DEPTH_FIT_THINK=1 makes a quarter of the fit contexts "Think of this: {caption}" + TAIL (tail positions like the
+think sets', after COCO scenes, none of the eval answers).
 Usage: python -m vlens depth OUT [N_FIT]"""
 from .common import *
 from .native import Native
@@ -22,7 +24,9 @@ from .qimg import ridge, ranks, summary, THINK
 
 LAYERS = tuple(int(x) for x in os.environ.get('VLENS_DEPTH_LAYERS', '4,8,12,16,20,24,28,32').split(','))
 SETS = os.environ.get('VLENS_DEPTH_SETS', 'photos,think,hop').split(',')
-RAW_L, SEED, N_EVAL = 28, 11, int(os.environ.get('VLENS_DEPTH_EVAL', 16))
+RAW = tuple(int(x) for x in os.environ.get('VLENS_DEPTH_RAW', '28').split(','))
+FIT_THINK = os.environ.get('VLENS_DEPTH_FIT_THINK') == '1'
+SEED, N_EVAL = 11, int(os.environ.get('VLENS_DEPTH_EVAL', 16))
 TAIL = " Don't name it or describe it. Just reply OK."
 HOP = [('the Eiffel Tower', "the tower built in Paris for the 1889 World's Fair"),
        ('a bald eagle', 'the national bird of the United States'),
@@ -123,6 +127,8 @@ def fit(Q, n_fit):
     for i, (im, caps) in enumerate(zip(ims, df['sentences'])):
         if i % 2 == 0 and im is not None:
             s = states(Q, SEE_T, square(im))
+        elif FIT_THINK and i % 4 == 1:                       # tail positions after a scene the model is told to keep
+            s = states(Q, f'Think of this: {clean(caps[0])}' + TAIL)
         else:
             s = states(Q, HOLD_TR[rng.randrange(len(HOLD_TR))].format(c=clean(caps[0])))
         for l in LAYERS:
@@ -152,7 +158,8 @@ def depth(out, n_fit=4000):
                 direct=[(f'Think of {x}.' + TAIL, None, x) for x, _ in PAIRS],
                 twostep=[(f'Think of {d}.' + TAIL, None, x) for x, d in PAIRS])
     sets = {k: v for k, v in sets.items() if k in SETS}
-    cols = [f'L{l}' for l in LAYERS] + [f'L{Q.last}', f'raw L{RAW_L}']
+    assert all(l in LAYERS for l in RAW), (RAW, LAYERS)
+    cols = [f'L{l}' for l in LAYERS] + [f'L{Q.last}'] + [f'raw L{l}' for l in RAW]
     pics, res = {}, dict(layers=list(LAYERS) + [Q.last], fits={str(l): v for l, v in fits.items()}, columns=cols, scores={})
     for name, items in sets.items():
         pics[name] = {c: [] for c in cols}
@@ -160,7 +167,7 @@ def depth(out, n_fit=4000):
             s = states(Q, text, im); pos = slice(None) if im is not None else slice(-tail_len(Q, text), None)
             for c in cols:
                 if c.startswith('raw'):
-                    e = s[RAW_L][pos]
+                    e = s[int(c[5:])][pos]
                 elif c == f'L{Q.last}':
                     e = s[Q.last][pos]
                 else:
