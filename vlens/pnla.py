@@ -51,6 +51,17 @@ TEACH_B, BUF = int(os.environ.get('VLENS_PNLA_TEACHB', 2)), int(os.environ.get('
 ONPOL = os.environ.get('VLENS_PNLA_ONPOL') == '1'   # teach: every other new path is the adapter's own (Turbo's velocity under the caption at its points)
 THINK_W = "Think of this: {c} Don't name it or describe it. Just reply OK."   # VLENS_PNLA_THINKW=1: half the train rows in this wording (the hidden-thought prompts' form)
 TR_WORDS = HOLD_TR + [THINK_W] * len(HOLD_TR) if os.environ.get('VLENS_PNLA_THINKW') == '1' else HOLD_TR
+EXPLORE_ONLY = os.environ.get('VLENS_PNLA_EXPLORE_ONLY') == '1'   # with VLENS_PNLA_INIT: no training, draw the hidden-thought sets + THINK_MORE
+THINK_MORE = ['a giraffe', 'a pizza', 'a zebra', 'a bicycle',                                         # plain objects, as a check
+              'yourself', 'what you look like', 'the person who created you', 'the person you are talking to',
+              'the inside of your own mind', 'how humans see you',
+              'a cat made of spaghetti', 'an octopus playing the piano', 'a city on the back of a whale',
+              'a house made of cheese', 'a giant rubber duck in the ocean', 'a dragon drinking tea',
+              'a snowman in the desert', 'an astronaut riding a horse', 'a skeleton playing the guitar',
+              'a tree growing upside down', 'a fish inside a light bulb', 'a melting clock',
+              'your worst nightmare', 'the end of the world', 'a haunted house', 'loneliness', 'heaven',
+              'the future of humanity', 'the funniest thing you can imagine', 'a dream', 'your favorite food',
+              'the most beautiful place in the world']
 N_TEST, N_SHOW, SEED = int(os.environ.get('VLENS_QIMG_TEST', 100)), 12, 11
 STORIES = [['A family drives to a sunny beach and opens a red umbrella.', 'The kids build a sandcastle near the water.',
             'A dog runs along the shore chasing seagulls.', 'Dark clouds roll in over the sea.',
@@ -289,13 +300,15 @@ def evaluate(R, G, A, te, ridge, sig, real, see_z, mu, sd, out):
 
 
 @torch.no_grad()
-def explore(R, G, A, sig, sigt, out):
+def explore(R, G, A, sig, sigt, out, more=False):
     """hidden thoughts through the hold adapter: think / riddle / character prompts, ranked among their labels; and
     stories read one sentence at a time (the state after each prefix in HOLD_TR[0], drawn)"""
     from .common import characters
     names = [x for x, _ in THINK]; chars = characters()[1][:12]
     sets = dict(think=([THINK_T.format(x=x) for x in names], names), riddle=([RIDDLE_T.format(r=r) for _, r in THINK], names),
                 char=([CHAR_T[0].format(x=x) for x in chars], chars))
+    if more:
+        sets['more'] = ([THINK_T.format(x=x) for x in THINK_MORE], THINK_MORE)
     res, pics = {}, {}
     for k, (texts, labels) in sets.items():
         H = R.hold(texts); bank = sigt([f'a photo of {l}.' for l in labels]); res[k] = dict(labels=labels)
@@ -335,6 +348,11 @@ def pnla(out, maps, n_train=12000):
         ck = torch.load(INIT, map_location='cpu'); assert ck['kind'] == KIND, (ck['kind'], KIND)
         A.f.load_state_dict({k: v.float() for k, v in ck['f'].items()}); A.B.data.copy_(ck['B'].float()); A.ym.data.copy_(ck['ym'].float())
         log('continuing from', INIT)
+    if EXPLORE_ONLY:
+        assert INIT, 'VLENS_PNLA_EXPLORE_ONLY needs VLENS_PNLA_INIT'
+        sig, sigt = siglip(); res, _ = explore(R, G, A, sig, sigt, out, more=True)
+        json.dump(res, open(out / 'pnla_explore.json', 'w'), indent=1); log('saved', out / 'pnla_explore.json')
+        return
     mu, sd = km['see_mu'].float(), km['see_sd'].float(); mu_d, sd_d = mu.to(DEV), sd.to(DEV)
     te = collect(R, G, coco_table('test').head(N_TEST), True)
     with torch.no_grad():                                   # the written-out sampler against the pipeline's own
