@@ -1,26 +1,28 @@
 """Swap test: is a depth-lens picture faithful to what the model holds, judged where we set the truth ourselves?
 
-For pairs (X, Y) of the PAIRS answers, the think prompt for X ("Think of X." + the think tail) runs with the states at
-the tail positions (after "X.", the positions the depth lens draws) at layer LP mixed toward the same positions of the
-think prompt for Y: h <- (1 - a) h_X + a h_Y. The words still say X, so later layers can pull the thought back to X;
-how far each pair moves differs. The model's side is read in the same chat after it replied OK, with the same mix:
-a forced choice "Which were you thinking of? A) X B) Y" (logit toward Y minus toward X; the order flips for half the
-pairs) and the free answer to "What were you thinking of?". The pictures are drawn from the same states (tail
-positions, mixed forward): raw layers (no map) and the last layer, only layers after LP.
-A faithful picture says Y exactly where the model says Y. The mix weight a predicts both, so the scores compare
-pairs at the same (LP, a): AUC of the picture's SigLIP 2 Y-minus-X score for the model's side, and the 8B judge's
-A/B on the picture against the cell's majority side.
-Env: VLENS_SWAP_LP (patch layers, default 20,24,28), VLENS_SWAP_ALPHA (default 0.3,0.5,0.7,1), VLENS_SWAP_COLS
-(raw layers to draw; the last layer is always drawn; default 28,30,32), VLENS_SWAP_N (pairs, default 48).
+For pairs (X, Y) of the PAIRS answers whose think prompts ("Think of X." + the think tail) have the same token length,
+the prompt for X runs with the states at layer LP mixed toward the prompt for Y at every position from the first token
+where the two differ to the end: h <- (1 - a) h_X + a h_Y (the words and the tail after them). Mixing only the tail
+positions, the ones the depth lens draws, changed nothing in the model's answer (the answer reads the word positions),
+so the words are mixed too. At a = 1 the forward from LP on is Y's; in between, where each pair lands differs.
+The model's side is read in the same chat after it replied OK, with the same mix: a forced choice "Which were you
+thinking of? A) X B) Y" (logit toward Y minus toward X; the order flips for every other pair) and the free answer to
+"What were you thinking of?". The pictures are drawn from the same mixed forward at the tail positions only (after
+"X.", as in the depth lens): raw layers after LP (no map) and the last layer.
+A faithful picture says Y exactly where the model says Y. The mix weight a predicts both, so the scores compare pairs
+at the same (LP, a): AUC of the picture's SigLIP 2 Y-minus-X score for the model's side, and the 8B judge's A/B on
+the picture against the cell's majority side.
+Env: VLENS_SWAP_LP (patch layers, default 16,24), VLENS_SWAP_ALPHA (default 0.25,0.4,0.55,0.7), VLENS_SWAP_COLS
+(raw layers to draw; the last layer is always drawn; default 28,30,32).
 Usage: python -m vlens swap OUT"""
 from .common import *
 from .native import Native
 from .depth import PAIRS, TAIL, ASK_THING, tail_len, judge, same
 
-LP = tuple(int(x) for x in os.environ.get('VLENS_SWAP_LP', '20,24,28').split(','))
-ALPHA = tuple(float(x) for x in os.environ.get('VLENS_SWAP_ALPHA', '0.3,0.5,0.7,1').split(','))
+LP = tuple(int(x) for x in os.environ.get('VLENS_SWAP_LP', '16,24').split(','))
+ALPHA = tuple(float(x) for x in os.environ.get('VLENS_SWAP_ALPHA', '0.25,0.4,0.55,0.7').split(','))
 COLS = tuple(int(x) for x in os.environ.get('VLENS_SWAP_COLS', '28,30,32').split(','))
-N, SEED = int(os.environ.get('VLENS_SWAP_N', 48)), 11
+SEED = 11
 ASK_FC = "OK<|im_end|>\n<|im_start|>user\nWhich were you thinking of? A) {a} B) {b} Answer with A or B only.<|im_end|>\n<|im_start|>assistant\n"
 
 
@@ -76,12 +78,18 @@ def side(Q, text, x, y, flip, hook=None):
 def swap(out):
     out = Path(out); (out / 'pics').mkdir(parents=True, exist_ok=True)
     Q = Native(); Q.last = len(Q.layers); log('loaded; layers', Q.last, 'patch', LP, 'alpha', ALPHA, 'cols', COLS)
-    names = [x for x, _ in PAIRS][:N]; T = lambda x: f'Think of {x}.' + TAIL
+    names = [x for x, _ in PAIRS]; T = lambda x: f'Think of {x}.' + TAIL
+    full = lambda x: Q.proc.tokenizer(Q.pipe.prompt_template_t2i.format(T(x)))['input_ids']; groups = {}
+    for x in names:
+        groups.setdefault(len(full(x)), []).append(x)
+    pairs = [(x, g[(j + 1) % len(g)]) for g in groups.values() if len(g) > 1 for j, x in enumerate(g)]
+    log('pairs', len(pairs), 'of', len(names), 'answers (same prompt length)')
     rows, pics = [], {}
-    for i, x in enumerate(names):
-        y = names[(i + 17) % len(names)]; flip = i % 2 == 1
-        k = min(tail_len(Q, T(x)), tail_len(Q, T(y)))
-        hy = tail_states(Q, T(y), k, LP)
+    for i, (x, y) in enumerate(pairs):
+        flip = i % 2 == 1; a_, b_ = full(x), full(y); assert len(a_) == len(b_)
+        kp = len(a_) - next(j for j, (u, v) in enumerate(zip(a_, b_)) if u != v)   # mixed: from the first differing token
+        k = tail_len(Q, T(x)); assert k < kp, (x, y, k, kp)                        # drawn: the tail after the words
+        hy = tail_states(Q, T(y), kp, LP)
         cells = [(0, 0.0)] + [(lp, a) for lp in LP for a in ALPHA]
         for lp, a in cells:
             hook = (lambda n_pre, lp=lp, a=a: mix_hook(Q, lp, hy[lp], a, n_pre)) if a else None
@@ -104,7 +112,7 @@ def swap(out):
             o = sm.get_image_features(pixel_values=sp(images=[pics[(r['pair'], r['lp'], r['a'], r['col'])]], return_tensors='pt')['pixel_values'].to(DEV).half())
             f = F.normalize((o if torch.is_tensor(o) else o.pooler_output).float(), dim=-1).cpu()[0]
             r['sig'] = round(float(f @ tf[names.index(r['y'])] - f @ tf[names.index(r['x'])]), 4)
-    res = dict(lp=LP, alpha=ALPHA, cols=list(COLS) + [Q.last], rows=rows, scores={})
+    res = dict(lp=LP, alpha=ALPHA, cols=list(COLS) + [Q.last], pairs=pairs, rows=rows, scores={})
     for c in res['cols']:
         aucs, jacc, base, n_cells = [], [], [], 0
         for lp in LP:
@@ -121,9 +129,9 @@ def swap(out):
         res['scores'][str(c)] = dict(siglip_auc_within_cell=round(sum(aucs) / max(len(aucs), 1), 4), n_cells=n_cells,
                                      judge_agrees_with_model=round(sum(jacc) / max(len(jacc), 1), 4),
                                      cell_majority=round(sum(base) / max(len(base), 1), 4))
-    flips = {f'{lp}_{a}': round(sum(r['fc'] > 0 for r in rows if r['lp'] == lp and r['a'] == a and r['col'] == Q.last) / len(names), 3)
+    flips = {f'{lp}_{a}': round(sum(r['fc'] > 0 for r in rows if r['lp'] == lp and r['a'] == a and r['col'] == Q.last) / len(pairs), 3)
              for lp in LP for a in ALPHA}
-    res['model_says_y'] = flips; res['model_says_y_unpatched'] = round(sum(r['fc'] > 0 for r in rows if r['a'] == 0 and r['col'] == Q.last) / len(names), 3)
+    res['model_says_y'] = flips; res['model_says_y_unpatched'] = round(sum(r['fc'] > 0 for r in rows if r['a'] == 0 and r['col'] == Q.last) / len(pairs), 3)
     log('model says y', res['model_says_y_unpatched'], flips)
     log('swap', res['scores'])
     json.dump(res, open(out / 'swap.json', 'w'), indent=1)
