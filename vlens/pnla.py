@@ -48,6 +48,8 @@ FMGEN = os.environ.get('VLENS_PNLA_FMGEN', '')     # e.g. Qwen/Qwen-Image-2.1: t
 PEEK_MIN = float(os.environ.get('VLENS_PNLA_PEEK', 15))     # minutes between quick evals during training (32 test photos)
 W_TEACH = float(os.environ.get('VLENS_PNLA_TEACH', 0))       # weight of the caption-path velocity loss (hold)
 TEACH_B, BUF = int(os.environ.get('VLENS_PNLA_TEACHB', 2)), int(os.environ.get('VLENS_PNLA_BUF', 4000))
+THINK_W = "Think of this: {c} Don't name it or describe it. Just reply OK."   # VLENS_PNLA_THINKW=1: half the train rows in this wording (the hidden-thought prompts' form)
+TR_WORDS = HOLD_TR + [THINK_W] * len(HOLD_TR) if os.environ.get('VLENS_PNLA_THINKW') == '1' else HOLD_TR
 N_TEST, N_SHOW, SEED = int(os.environ.get('VLENS_QIMG_TEST', 100)), 12, 11
 STORIES = [['A family drives to a sunny beach and opens a red umbrella.', 'The kids build a sandcastle near the water.',
             'A dog runs along the shore chasing seagulls.', 'Dark clouds roll in over the sea.',
@@ -219,7 +221,7 @@ def collect(R, G, df, test):
         log('test' if test else 'train', 'photos', len(caps))
     rng = random.Random(0)
     rows = [(i, HOLD_TE[0].format(c=c[0])) for i, c in enumerate(caps)] if test else \
-           [(i, HOLD_TR[rng.randrange(len(HOLD_TR))].format(c=x)) for i, c in enumerate(caps) for x in c]
+           [(i, TR_WORDS[rng.randrange(len(TR_WORDS))].format(c=x)) for i, c in enumerate(caps) for x in c]
     out = dict(z=torch.cat(Z), see=torch.cat(S), caps=caps, ims=ims, rcap=[c[0] for c in caps] if test else [x for c in caps for x in c])
     if KIND == 'see':
         out.update(src=out['see'], idx=torch.arange(len(caps)))
@@ -339,7 +341,7 @@ def pnla(out, maps, n_train=12000):
     tr = collect(R, G, coco_table('train').sample(frac=1, random_state=0).head(int(n_train)), False)
     log('train photos', len(tr['caps']), 'sources', len(tr['src']), 'latents', tuple(tr['z'].shape), 'test photos', len(te['caps']))
     sig, sigt = siglip(); real = sig(te['ims']); see_z = (te['see'].float() - mu) / sd
-    res = dict(kind=KIND, init=INIT, fm_model=FMGEN or GEN, weights=dict(fm=W_FM, rb=W_RB, anchor=W_ANC, rft_k=RFT_K, rft_batch=RFT_BS, teach=W_TEACH, teach_b=TEACH_B, buf=BUF),
+    res = dict(kind=KIND, init=INIT, think_wording=TR_WORDS is not HOLD_TR, fm_model=FMGEN or GEN, weights=dict(fm=W_FM, rb=W_RB, anchor=W_ANC, rft_k=RFT_K, rft_batch=RFT_BS, teach=W_TEACH, teach_b=TEACH_B, buf=BUF),
                train_px=TR_PX, eval_px=EV_PX, n_train=len(tr['caps']), n_sources=len(tr['src']), lr=LR, batch=BS, rb_batch=RB_BS, kmin=KMIN, tau=TAU, bank=BANK)
     if W_TEACH:
         TE_te, TE_tr = G.caption_states(te['rcap']), G.caption_states(tr['rcap']); G.drop_encoder()
