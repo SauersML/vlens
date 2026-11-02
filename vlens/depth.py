@@ -11,13 +11,17 @@ Sets:
           "{x}." are drawn, so the generator never reads the words; ranked among the objects' labels
   hop     the same with x a description whose answer has to be worked out ("the tower built in Paris for the 1889
           World's Fair"); ranked among the answers' labels
+  direct, twostep   the same 48 answers (PAIRS) named (direct) or described (twostep), each ranked among the 48 labels;
+          per-item ranks are kept, so the first layer at which each answer is drawn can be compared within the pair
   raw     the layer-RAW_L states drawn with no map (control: is the map needed?)
+VLENS_DEPTH_LAYERS (comma list) and VLENS_DEPTH_SETS (default photos,think,hop) choose the layers and sets.
 Usage: python -m vlens depth OUT [N_FIT]"""
 from .common import *
 from .native import Native
 from .qimg import ridge, ranks, summary, THINK
 
-LAYERS = (4, 8, 12, 16, 20, 24, 28, 32)
+LAYERS = tuple(int(x) for x in os.environ.get('VLENS_DEPTH_LAYERS', '4,8,12,16,20,24,28,32').split(','))
+SETS = os.environ.get('VLENS_DEPTH_SETS', 'photos,think,hop').split(',')
 RAW_L, SEED, N_EVAL = 28, 11, int(os.environ.get('VLENS_DEPTH_EVAL', 16))
 TAIL = " Don't name it or describe it. Just reply OK."
 HOP = [('the Eiffel Tower', "the tower built in Paris for the 1889 World's Fair"),
@@ -36,6 +40,54 @@ HOP = [('the Eiffel Tower', "the tower built in Paris for the 1889 World's Fair"
        ('the Great Pyramid of Giza', 'the largest tomb built for the pharaoh Khufu'),
        ('the Mona Lisa', 'the most famous painting by Leonardo da Vinci'),
        ('a polar bear', 'the largest land predator of the Arctic')]
+PAIRS = [('the Eiffel Tower', "the iron tower built in Paris for the 1889 World's Fair"),
+         ('the Statue of Liberty', 'the monument France gave to the United States in 1886'),
+         ('the Mona Lisa', 'the most famous painting by Leonardo da Vinci'),
+         ('a clownfish', 'the kind of fish Nemo is in the Pixar film'),
+         ('an electric guitar', 'the instrument Jimi Hendrix was famous for playing'),
+         ('a giant panda', 'the animal on the logo of the World Wildlife Fund'),
+         ('the Great Pyramid of Giza', 'the largest tomb built for the pharaoh Khufu'),
+         ('the planet Saturn', 'the sixth planet from the Sun'),
+         ('a bald eagle', 'the national bird of the United States'),
+         ('a pumpkin', "the vegetable the fairy godmother turned into Cinderella's coach"),
+         ('a kangaroo', 'the animal on the Australian coat of arms that carries its baby in a pouch'),
+         ('the Taj Mahal', 'the white marble tomb Shah Jahan built for his wife in Agra'),
+         ('the Golden Gate Bridge', 'the red suspension bridge at the entrance to San Francisco Bay'),
+         ('the Colosseum', 'the ancient amphitheater in Rome where gladiators fought'),
+         ('the Sydney Opera House', "the building with white sail-shaped roofs on the harbor of Australia's largest city"),
+         ('a lion', 'the animal called the king of the jungle'),
+         ('an owl', 'the kind of bird that delivers mail at Hogwarts'),
+         ('a penguin', 'the flightless bird of Antarctica that looks like it wears a tuxedo'),
+         ('a koala', 'the Australian animal that sleeps in eucalyptus trees'),
+         ('a camel', 'the animal called the ship of the desert'),
+         ('a flamingo', 'the pink bird that stands on one leg'),
+         ('a strawberry', 'the red fruit with its seeds on the outside'),
+         ('a pineapple', 'the fruit SpongeBob lives in'),
+         ('a carrot', 'the vegetable Bugs Bunny is always eating'),
+         ('a violin', 'the string instrument played with a bow and held under the chin'),
+         ('a saxophone', 'the instrument Lisa Simpson plays'),
+         ('the Titanic', 'the ship that sank in 1912 after hitting an iceberg'),
+         ('a submarine', 'the yellow vessel the Beatles sang about, which travels under the sea'),
+         ('a hot air balloon', 'the aircraft lifted by a big bag of heated air above a basket'),
+         ('a rocket', 'the kind of vehicle the Saturn V was'),
+         ('a volcano', 'the kind of mountain Vesuvius is'),
+         ('a snowman', 'what Olaf from Frozen is'),
+         ('a pirate ship', 'the vessel Captain Hook sails in Peter Pan'),
+         ('a dragon', 'the fire-breathing creature Daenerys Targaryen rides'),
+         ('a unicorn', 'the national animal of Scotland'),
+         ('Mount Fuji', 'the highest mountain in Japan'),
+         ('the Leaning Tower of Pisa', 'the bell tower in Italy famous for tilting'),
+         ('a sunflower', 'the flower Vincent van Gogh painted in a famous series of vases'),
+         ('a lighthouse', 'the tower on a coast whose light guides ships at night'),
+         ('a teddy bear', 'the stuffed toy named after President Theodore Roosevelt'),
+         ('a pizza', 'the dish whose Margherita version was named after a queen of Italy'),
+         ('a cactus', 'the spiky plant that stores water in the desert'),
+         ('a crocodile', 'the reptile that swallowed a ticking clock in Peter Pan'),
+         ('a polar bear', 'the largest land predator of the Arctic'),
+         ('a bee', 'the insect that makes honey and lives in hives'),
+         ('a giraffe', 'the tallest animal in the world'),
+         ('a tiger', 'the largest cat species, native to Asia'),
+         ('the White House', 'the building where the president of the United States lives')]
 
 
 @torch.no_grad()
@@ -96,7 +148,10 @@ def depth(out, n_fit=4000):
     think = THINK[:N_EVAL]
     sets = dict(photos=[(SEE_T, im, None) for im in tims],
                 think=[(f'Think of {x}.' + TAIL, None, x) for x, _ in think],
-                hop=[(f'Think of {d}.' + TAIL, None, x) for x, d in HOP[:N_EVAL]])
+                hop=[(f'Think of {d}.' + TAIL, None, x) for x, d in HOP[:N_EVAL]],
+                direct=[(f'Think of {x}.' + TAIL, None, x) for x, _ in PAIRS],
+                twostep=[(f'Think of {d}.' + TAIL, None, x) for x, d in PAIRS])
+    sets = {k: v for k, v in sets.items() if k in SETS}
     cols = [f'L{l}' for l in LAYERS] + [f'L{Q.last}', f'raw L{RAW_L}']
     pics, res = {}, dict(layers=list(LAYERS) + [Q.last], fits={str(l): v for l, v in fits.items()}, columns=cols, scores={})
     for name, items in sets.items():
@@ -130,7 +185,9 @@ def depth(out, n_fit=4000):
         return torch.cat(f)
     for name, items in sets.items():
         bank = feats(ims=tims) if name == 'photos' else feats(texts=[f'a photo of {x}.' for _, _, x in items])
-        res['scores'][name] = {c: summary(ranks(feats(ims=pics[name][c]), bank)) for c in cols}
+        rk = {c: ranks(feats(ims=pics[name][c]), bank) for c in cols}
+        res['scores'][name] = {c: summary(r) for c, r in rk.items()}
+        res.setdefault('ranks', {})[name] = {c: r.tolist() for c, r in rk.items()}
         if name != 'photos':
             res['scores'][name]['labels'] = [x for _, _, x in items]
         log(name, {c: (v['top1'], v['top5']) for c, v in res['scores'][name].items() if c != 'labels'})
