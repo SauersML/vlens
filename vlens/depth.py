@@ -25,7 +25,7 @@ think sets', after COCO scenes, none of the eval answers).
 Usage: python -m vlens depth OUT [N_FIT]"""
 from .common import *
 from .native import Native
-from .qimg import ridge, ranks, summary, THINK
+from .qimg import ridge, ranks, ranks_z, summary, THINK
 
 LAYERS = tuple(int(x) for x in os.environ.get('VLENS_DEPTH_LAYERS', '4,8,12,16,20,24,28,32').split(','))
 SETS = os.environ.get('VLENS_DEPTH_SETS', 'photos,think,hop').split(',')
@@ -238,7 +238,10 @@ def depth(out, n_fit=4000):
                                  chance_top1=round(sum(1 / len({x['label'] for x in meta if x['cat'] == m['cat']}) for m in meta) / len(meta), 4))
             log('secret baselines', {k: v for k, v in res['secret'].items() if k != 'items'})
         else:
-            rk = {c: ranks(feats(ims=pics[name][c]), bank) for c in cols}
+            fs = {c: feats(ims=pics[name][c]) for c in cols}
+            rk = {c: ranks(fs[c], bank) for c in cols}
+            if name != 'photos':                          # also with each label's offset removed (ranks_z)
+                res.setdefault('scores_z', {})[name] = {c: summary(ranks_z(fs[c], bank)) for c in cols}
         res['scores'][name] = {c: summary(r) for c, r in rk.items()}
         res.setdefault('ranks', {})[name] = {c: r.tolist() for c, r in rk.items()}
         if name != 'photos':

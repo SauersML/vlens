@@ -70,6 +70,15 @@ def ranks(q, bank):
     return (s > s.diagonal()[:, None]).sum(1).cpu()
 
 
+def ranks_z(q, bank):
+    """ranks after each bank entry's similarities are standardized across the queries (q row i belongs to bank row i):
+    removes the offset of entries that every picture is close to (in SigLIP text banks a few labels, like "a
+    lighthouse", outscore the true label for many unrelated pictures)"""
+    s = F.normalize(q.float(), dim=-1) @ F.normalize(bank.float(), dim=-1).T
+    s = (s - s.mean(0)) / (s.std(0) + 1e-6)
+    return (s > s.diagonal()[:, None]).sum(1).cpu()
+
+
 def summary(r):
     r = r.float()
     return dict(n=len(r), top1=round(float((r < 1).float().mean()), 4), top5=round(float((r < 5).float().mean()), 4),

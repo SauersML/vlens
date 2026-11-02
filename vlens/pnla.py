@@ -32,7 +32,7 @@ Usage: python -m vlens pnla OUT MAPS [N_TRAIN]"""
 import gc
 from .common import *
 from .models import Reader
-from .qimg import ranks, summary, THINK, THINK_T, RIDDLE_T
+from .qimg import ranks, ranks_z, summary, THINK, THINK_T, RIDDLE_T
 
 GEN = 'Qwen/Qwen-Image-2.1-Turbo'
 KIND = os.environ.get('VLENS_PNLA_KIND', 'see')
@@ -48,6 +48,7 @@ FMGEN = os.environ.get('VLENS_PNLA_FMGEN', '')     # e.g. Qwen/Qwen-Image-2.1: t
 PEEK_MIN = float(os.environ.get('VLENS_PNLA_PEEK', 15))     # minutes between quick evals during training (32 test photos)
 W_TEACH = float(os.environ.get('VLENS_PNLA_TEACH', 0))       # weight of the caption-path velocity loss (hold)
 TEACH_B, BUF = int(os.environ.get('VLENS_PNLA_TEACHB', 2)), int(os.environ.get('VLENS_PNLA_BUF', 4000))
+ONPOL = os.environ.get('VLENS_PNLA_ONPOL') == '1'   # teach: every other new path is the adapter's own (Turbo's velocity under the caption at its points)
 THINK_W = "Think of this: {c} Don't name it or describe it. Just reply OK."   # VLENS_PNLA_THINKW=1: half the train rows in this wording (the hidden-thought prompts' form)
 TR_WORDS = HOLD_TR + [THINK_W] * len(HOLD_TR) if os.environ.get('VLENS_PNLA_THINKW') == '1' else HOLD_TR
 N_TEST, N_SHOW, SEED = int(os.environ.get('VLENS_QIMG_TEST', 100)), 12, 11
@@ -139,13 +140,15 @@ class Gen:
         return E, M
 
     @torch.no_grad()
-    def teach(self, Es, seeds, px):
+    def teach(self, Es, seeds, px, Cs=None):
         """Turbo's 8-step path from each seed's noise under states Es: the point before each step and the velocity
-        there, [B, steps, N, ch] bf16 each, and the final latents"""
+        there, [B, steps, N, ch] bf16 each, and the final latents. With Cs (the adapter's states) the path is the
+        adapter's own (it steps with Cs's velocity) and the recorded velocity is still the one under Es there"""
         E, M = self.pad(Es); x = self.noise(seeds, px); xs, vs = [], []
         for i in range(len(self.sig) - 1):
             v = self.v(x, self.sig[i], E, mask=M).float(); xs.append(x); vs.append(v.to(BF))
-            x = (x.float() + (self.sig[i + 1] - self.sig[i]) * v).to(BF)
+            step = v if Cs is None else self.v(x, self.sig[i], Cs).float()
+            x = (x.float() + (self.sig[i + 1] - self.sig[i]) * step).to(BF)
         return torch.stack(xs, 1), torch.stack(vs, 1), x
 
     def noise(self, seeds, px):
@@ -301,8 +304,8 @@ def explore(R, G, A, sig, sigt, out):
             P = [G.picture(C[i], SEED) for i in range(len(C))]; pics[k, tag] = P
             for i, p in enumerate(P):
                 p.save(out / 'pics' / f'{k}_{tag}_{i}.jpg', quality=90)
-            res[k][tag] = summary(ranks(sig(P), bank))
-        log('explore', k, {t: (res[k][t]['top1'], res[k][t]['top5']) for t in ('ridge', 'trained')}, 'of', len(labels))
+            f = sig(P); res[k][tag] = summary(ranks(f, bank)); res[k][tag + '_z'] = summary(ranks_z(f, bank))
+        log('explore', k, {t: (res[k][t]['top1'], res[k][t]['top5']) for t in ('ridge', 'trained', 'ridge_z', 'trained_z')}, 'of', len(labels))
     for j, story in enumerate(STORIES):
         H = R.hold([HOLD_TR[0].format(c=' '.join(story[:n + 1])) for n in range(len(story))])
         for ridge in (True, False):
@@ -341,7 +344,7 @@ def pnla(out, maps, n_train=12000):
     tr = collect(R, G, coco_table('train').sample(frac=1, random_state=0).head(int(n_train)), False)
     log('train photos', len(tr['caps']), 'sources', len(tr['src']), 'latents', tuple(tr['z'].shape), 'test photos', len(te['caps']))
     sig, sigt = siglip(); real = sig(te['ims']); see_z = (te['see'].float() - mu) / sd
-    res = dict(kind=KIND, init=INIT, think_wording=TR_WORDS is not HOLD_TR, fm_model=FMGEN or GEN, weights=dict(fm=W_FM, rb=W_RB, anchor=W_ANC, rft_k=RFT_K, rft_batch=RFT_BS, teach=W_TEACH, teach_b=TEACH_B, buf=BUF),
+    res = dict(kind=KIND, init=INIT, think_wording=TR_WORDS is not HOLD_TR, fm_model=FMGEN or GEN, weights=dict(fm=W_FM, rb=W_RB, anchor=W_ANC, rft_k=RFT_K, rft_batch=RFT_BS, teach=W_TEACH, teach_b=TEACH_B, buf=BUF, on_policy=ONPOL),
                train_px=TR_PX, eval_px=EV_PX, n_train=len(tr['caps']), n_sources=len(tr['src']), lr=LR, batch=BS, rb_batch=RB_BS, kmin=KMIN, tau=TAU, bank=BANK)
     if W_TEACH:
         TE_te, TE_tr = G.caption_states(te['rcap']), G.caption_states(tr['rcap']); G.drop_encoder()
@@ -364,12 +367,15 @@ def pnla(out, maps, n_train=12000):
     sigs = torch.tensor(G.sig[:-1], device=DEV); hist, acc = [], {}; t0 = time.monotonic(); step = 0; off = None   # off: running mean readback of the pictures
     next_peek = PEEK_MIN; res['peeks'] = []          # quick evals: the first 32 test photos drawn at the training size, ranked among all 100
     if W_TEACH:                                      # buffer of caption paths: points, velocities, source row
-        N, ch = Z.shape[1], Z.shape[2]; ns = len(sigs); filled = 0; head = 0
+        N, ch = Z.shape[1], Z.shape[2]; ns = len(sigs); filled = 0; head = 0; n_paths = 0
         BX = torch.empty(BUF, ns, N, ch, dtype=BF, device=DEV); BV = torch.empty_like(BX); BR = torch.zeros(BUF, dtype=torch.long, device=DEV)
 
         def add_paths(n):
-            nonlocal filled, head
-            rows = torch.randint(len(SRC), (n,)).tolist(); xs, vs, _ = G.teach([TE_tr[r] for r in rows], torch.randint(1 << 30, (n,)).tolist(), TR_PX)
+            nonlocal filled, head, n_paths
+            rows = torch.randint(len(SRC), (n,)).tolist(); own = ONPOL and n_paths % 2 == 1; n_paths += 1
+            with torch.no_grad():
+                Cs = A(SRC[torch.tensor(rows, device=DEV)]).to(BF) if own else None
+            xs, vs, _ = G.teach([TE_tr[r] for r in rows], torch.randint(1 << 30, (n,)).tolist(), TR_PX, Cs)
             slots = [(head + j) % BUF for j in range(n)]
             BX[slots], BV[slots], BR[slots] = xs, vs, torch.tensor(rows, device=DEV)
             head = (head + n) % BUF; filled = min(BUF, filled + n)
