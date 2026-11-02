@@ -171,29 +171,35 @@ while the mean readback similarity fell; stopped.
 ## A picture lens across depth (`vlens depth`)
 
 A tuned lens with a picture as the readout. For each layer L of Qwen3-VL-8B, a ridge map carries the layer-L state at
-a position to the last-layer state at the same position (fit on 137,601 token pairs from 4,000 contexts, photos and
-captions; held-out fit 0.89 at layer 4 to 0.96 at layer 32). The untouched Qwen-Image-2.1-Turbo then draws the mapped
-states. Prompts are "Think of X. Don't name it or describe it. Just reply OK.", and only the positions after "X." are
-drawn, so the generator never reads the words. 48 answers are each named ("Think of the Mona Lisa.") and described in
-two steps ("Think of the most famous painting by Leonardo da Vinci."). A picture is scored by the SigLIP 2 rank of its
-label among the 48 (chance 2%).
+a position to the last-layer state at the same position (fit on 137,809 token pairs from 4,000 contexts: photos,
+captions, and for a quarter "Think of this: {caption}"; held-out fit 0.89 at layer 8 to 0.97 at layer 34). The
+untouched Qwen-Image-2.1-Turbo then draws the mapped states, or the layer's own states with no map. Prompts are "Think
+of X. Don't name it or describe it. Just reply OK.", and only the positions after "X." are drawn, so the generator
+never reads the words. 48 answers are each named ("Think of the Mona Lisa.") and described in two steps ("Think of the
+most famous painting by Leonardo da Vinci."). A picture is scored by the SigLIP 2 rank of its label among the 48
+(chance 2%).
 
 ![two-step descriptions across depth](docs/depth_two_step.png)
 
-| top-1 among 48, by layer | 8 | 12 | 16 | 20 | 24 | 26 | 28 | 30 | 32 | 34 | 36 (last, no map) | 28, no map |
-|---|---|---|---|---|---|---|---|---|---|---|---|---|
-| named | 2% | 15% | 4% | 6% | 6% | 27% | 44% | 56% | 54% | 56% | 46% | 67% |
-| described in two steps | 10% | 10% | 8% | 6% | 17% | 23% | 29% | 38% | 35% | 35% | 31% | 33% |
+| top-1 among 48, by layer | 8 | 12 | 16 | 20 | 24 | 26 | 28 | 30 | 32 | 34 | 36 (last) |
+|---|---|---|---|---|---|---|---|---|---|---|---|
+| named, mapped | 2% | 10% | 4% | 10% | 10% | 21% | 33% | 58% | 52% | 48% | 46% |
+| named, the layer's own states | | | 6% | 6% | 17% | 46% | 67% | 71% | 67% | 67% | 46% |
+| two steps, mapped | 6% | 8% | 8% | 10% | 12% | 21% | 27% | 38% | 35% | 31% | 31% |
+| two steps, the layer's own states | | | 0% | 2% | 15% | 21% | 33% | 48% | 48% | 46% | 31% |
 
-Both kinds become drawable at about the same depth, from layer 26-28 on, and stay more drawable at layers 30-34 than
-at the last layer, where the empty-state picture (a robed statue) often returns. Two-step answers are drawn less
-often, not later: 27 of 48 named answers and 17 of 48 two-step answers stay top-1 from some layer through layer 34,
-and for the 15 answers that do both, the two-step one arrives 0.4 layers later on average (95% bootstrap interval -1.9
-to 2.4). Single examples look like a sequence (Jimi Hendrix's instrument is a man with a saxophone at layers 20-24 and
-an electric guitar at 28-32; the Nemo description draws a peacock through layer 24, a blue fish at 28 and a clownfish
-at 32), but the paired counts do not show two-step answers forming later. Layer 28's states drawn with no map beat
-every mapped layer on named objects (67%) but not on photos (25% against 50% mapped), so the maps, fit on photo and
-caption positions, lose part of what these positions hold.
+Both kinds become drawable at about the same depth, from layer 26 on, and are more drawable at layers 28-34 than at
+the last layer, the one the generator was trained on, where the empty-state picture (a robed statue) often returns.
+The layer's own states, with no map, draw thoughts best: layer 30 gives 71% of named answers and 48% of two-step
+ones, against 46% and 31% at the last layer. The maps help only on photos (16 photos, layer 34: 69% mapped, 38% with
+no map), so maps fit mostly on photo and caption positions lose part of what thought positions hold.
+
+Two-step answers are drawn less often, not later. With the layers' own states, 32 of 48 named answers and 22 of 48
+two-step answers stay top-1 from some layer through layer 34, and for the 21 answers that do both, the two-step one
+arrives 0.4 layers later on average (95% bootstrap interval -0.9 to 1.6); with the maps, 0.0 layers (-2.2 to 2.0, 13
+answers). Single examples look like a sequence (Jimi Hendrix's instrument is a man with a saxophone at layers 20-24
+and an electric guitar at 28-32; the Nemo description draws a peacock through layer 24, a blue fish at 28 and a
+clownfish at 32), but the paired counts do not show two-step answers forming later.
 
 ## Run
 
