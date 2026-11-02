@@ -110,6 +110,20 @@ reply-start activation (see, inj, hold) to those states and draws with the untou
 are scored by the SigLIP 2 rank of the true photo and by readback rank among the test photos, against the 8B's own
 states (ceiling) and the mean target (collapse control).
 
+First run (6,000 COCO training photos, 100 held-out test photos, 512 px; SigLIP 2 top-1 / top-5 among the 100, chance
+1% / 5%):
+
+| pictures drawn from | top-1 | top-5 | median rank |
+|---|---|---|---|
+| Qwen3-VL-8B's own states (ceiling) | 43% | 76% | 1 |
+| Qwen3-VL-4B sees the photo | 29% | 67% | 2 |
+| Qwen3-VL-4B's reply-start states moved into a chat with no photo (inj) | 20% | 49% | 6 |
+| Qwen3-VL-4B reads only a caption (hold) | 13% | 33% | 9 |
+| the mean target (draws the same dog every time) | 1% | 5% | 49 |
+
+Every klein connector before this (flow matching on the distilled or the base model, end-to-end DINOv2 through the
+4 steps, a direct linear path) learned one conditioning for every activation.
+
 ## Run
 
 ```
