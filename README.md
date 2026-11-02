@@ -155,12 +155,18 @@ the same 100 test photos, seed and size as above.
 | the same, 60 more minutes | 56% | 89% | 34% | 61% |
 | reads a caption, ridge map (start) | 22% | 50% | 11% | |
 | reads a caption, Turbo's flow-matching loss on the photo | 15% | 44% | 10% | 17% |
+| reads a caption, Turbo's own path from the caption text (teach) | 24% | 68% | 10% | 25% |
+| (the caption text itself, drawn by Turbo: the ceiling for teach) | 70% | 94% | | |
 
 From the see chat the trained pictures match the photos' layout and colour far better than the 8B's own states do
 (43%), and the 4B reads them back closer to its own activation though readback was never trained. They are softer
 than the ridge map's pictures and sometimes blend objects. From a caption the same training washes the pictures out
 into blended, ghostly scenes: Turbo is distilled, so the condition that minimizes its denoising loss draws an average
-of the plausible pictures, and a caption allows many. Taking the loss from the undistilled base model
+of the plausible pictures, and a caption allows many. What fixed the caption pictures is a target fixed by the caption: Turbo draws the caption text (the pipeline's own
+encoding by Qwen3-VL-8B) from seeded noise, and the adapter's states have to give Turbo's velocity at every point of
+that 8-step path (`VLENS_PNLA_TEACH`). After 65 minutes the pictures are sharp scenes again, top-5 rises from 50% to
+68%, and on hidden thoughts top-5 rises from 50% to 71% (think) and from 50% to 62% (riddle) at the same top-1 (29%,
+21%). Taking the loss from the undistilled base model
 (Qwen/Qwen-Image-2.1) instead, with Turbo still drawing, made both kinds worse within 15 minutes (quick eval on 32
 test photos: from the photo 38% to 16% top-1, from a caption 19% to 3%); stopped.
 
