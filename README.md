@@ -84,17 +84,31 @@ gets no prompt and no word embeddings. A small trained adapter computes klein's 
 ## A real LLM's own states, no training (`vlens native`)
 
 Qwen-Image-2.1 (Alibaba, September 2026) generates pictures from the last-layer states of Qwen3-VL-8B, and its encoder
-is the public Qwen3-VL-8B-Instruct checkpoint (checked tensor by tensor). So no adapter is needed:
-Qwen3-VL-8B reads a blank prompt while its states are changed from the inside, and Qwen-Image-2.1-Turbo renders them.
-- **Concept steering:** + a multiple of a concept direction after layer 18 (mean state of photos whose captions name
-  the concept minus the mean over all photos).
-- **Neuron steering:** + 10, 20 or 40 standard deviations on the single MLP neuron of layer 18 that best separates
-  those photos; random neurons at the same strength are the control.
-- **Transplant:** the states of the last 5 positions while Qwen3-VL-8B looks at a real photo, copied into the blank
-  prompt after layer 8 or 18.
+is the public Qwen3-VL-8B-Instruct checkpoint (checked tensor by tensor). When the pipeline edits a photo, the photo's
+own positions are replaced by its VAE latents, so Qwen3-VL's states at the image tokens never reach the generator;
+only its states at the text positions do, including the positions after the photo, which have attended to it.
+- **States only, no pixels:** Qwen3-VL-8B looks at a photo inside the pipeline's edit template; the generator gets
+  only its last-layer states at the text positions. With the vlens see prompt after the photo (33 positions) the
+  pictures come back as the photo's scene: a motorcycle rider, a long-haired girl, a kitchen, wooden spoons,
+  bathrooms (first 8 test photos in order, 7 recognisable). The last 5 positions alone keep much less.
+- **Concept steering:** + s x (typical state size) along a concept direction after layer 18, at every position of a
+  blank prompt (the direction: mean reply-start state of photos whose captions name the concept minus that of all
+  photos; the raw gap is only 2-4% of the state size, which is why fixed multiples of it changed nothing). At s = 1
+  the dog, cat and horse directions draw a dog, a cat and a rider on a horse; s = 4 gives noise. Asked what it is
+  thinking about in the same steered state, Qwen3-VL-8B names the concept for 8 of 16 ("You're thinking about the
+  dog", "Boeing 737 MAX 8", "British Rail Class 47 Locomotive", "A small boat on a calm sea").
+- **Neuron steering:** the single MLP neuron of layer 18 that best separates those photos, raised until its write
+  has the same size: no recognisable effect on pictures or words.
 
-Every picture in a row uses the same noise. Qwen3-VL-8B is also asked, in the same steered state, what it is thinking
-about.
+Every picture in a row uses the same noise.
+
+## Adapter into Qwen-Image-2.1 (`vlens qimg`)
+
+The states-only result gives an adapter an exact per-photo target: Qwen3-VL-8B's states after it looked at the photo,
+which the generator draws from. `vlens qimg` fits ridge maps (closed form, per source kind) from Qwen3-VL-4B's
+reply-start activation (see, inj, hold) to those states and draws with the untouched Qwen-Image-2.1-Turbo. The pictures
+are scored by the SigLIP 2 rank of the true photo and by readback rank among the test photos, against the 8B's own
+states (ceiling) and the mean target (collapse control).
 
 ## Run
 
