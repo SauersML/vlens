@@ -66,7 +66,7 @@ class Native:
     def picture(self, e, seed):
         pe, pm = e
         return self.pipe(prompt_embeds=pe, prompt_embeds_mask=pm, height=RES, width=RES,
-                         generator=torch.Generator('cpu').manual_seed(seed)).images[0]
+                         generator=torch.Generator('cpu').manual_seed(seed)).images[0].convert('RGB')   # the generator outputs RGBA
 
     @torch.no_grad()
     def see(self, ims, layers):
