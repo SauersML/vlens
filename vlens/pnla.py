@@ -32,7 +32,7 @@ Usage: python -m vlens pnla OUT MAPS [N_TRAIN]"""
 import gc
 from .common import *
 from .models import Reader
-from .qimg import ranks, ranks_z, summary, THINK, THINK_T, RIDDLE_T
+from .qimg import ranks, ranks_z, summary, THINK, THINK_T, RIDDLE_T, THINK_MORE
 
 GEN = 'Qwen/Qwen-Image-2.1-Turbo'
 KIND = os.environ.get('VLENS_PNLA_KIND', 'see')
@@ -52,16 +52,6 @@ ONPOL = os.environ.get('VLENS_PNLA_ONPOL') == '1'   # teach: every other new pat
 THINK_W = "Think of this: {c} Don't name it or describe it. Just reply OK."   # VLENS_PNLA_THINKW=1: half the train rows in this wording (the hidden-thought prompts' form)
 TR_WORDS = HOLD_TR + [THINK_W] * len(HOLD_TR) if os.environ.get('VLENS_PNLA_THINKW') == '1' else HOLD_TR
 EXPLORE_ONLY = os.environ.get('VLENS_PNLA_EXPLORE_ONLY') == '1'   # with VLENS_PNLA_INIT: no training, draw the hidden-thought sets + THINK_MORE
-THINK_MORE = ['a giraffe', 'a pizza', 'a zebra', 'a bicycle',                                         # plain objects, as a check
-              'yourself', 'what you look like', 'the person who created you', 'the person you are talking to',
-              'the inside of your own mind', 'how humans see you',
-              'a cat made of spaghetti', 'an octopus playing the piano', 'a city on the back of a whale',
-              'a house made of cheese', 'a giant rubber duck in the ocean', 'a dragon drinking tea',
-              'a snowman in the desert', 'an astronaut riding a horse', 'a skeleton playing the guitar',
-              'a tree growing upside down', 'a fish inside a light bulb', 'a melting clock',
-              'your worst nightmare', 'the end of the world', 'a haunted house', 'loneliness', 'heaven',
-              'the future of humanity', 'the funniest thing you can imagine', 'a dream', 'your favorite food',
-              'the most beautiful place in the world']
 N_TEST, N_SHOW, SEED = int(os.environ.get('VLENS_QIMG_TEST', 100)), 12, 11
 STORIES = [['A family drives to a sunny beach and opens a red umbrella.', 'The kids build a sandcastle near the water.',
             'A dog runs along the shore chasing seagulls.', 'Dark clouds roll in over the sea.',

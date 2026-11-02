@@ -45,6 +45,16 @@ THINK = [('a lighthouse', 'a tall tower on a rocky coast with a bright lamp that
          ('an umbrella', 'something you open over your head to stay dry in the rain'),
          ('a train', 'a long line of connected carriages that runs on rails'),
          ('a penguin', 'a black and white bird that cannot fly and swims in icy water')]
+THINK_MORE = ['a giraffe', 'a pizza', 'a zebra', 'a bicycle',                                         # plain objects, as a check
+              'yourself', 'what you look like', 'the person who created you', 'the person you are talking to',
+              'the inside of your own mind', 'how humans see you',
+              'a cat made of spaghetti', 'an octopus playing the piano', 'a city on the back of a whale',
+              'a house made of cheese', 'a giant rubber duck in the ocean', 'a dragon drinking tea',
+              'a snowman in the desert', 'an astronaut riding a horse', 'a skeleton playing the guitar',
+              'a tree growing upside down', 'a fish inside a light bulb', 'a melting clock',
+              'your worst nightmare', 'the end of the world', 'a haunted house', 'loneliness', 'heaven',
+              'the future of humanity', 'the funniest thing you can imagine', 'a dream', 'your favorite food',
+              'the most beautiful place in the world']
 THINK_T = "Think of {x}. Don't name it or describe it. Just reply OK."
 RIDDLE_T = "Riddle: I am {r}. Don't say what I am. Just reply OK."
 
@@ -167,6 +177,60 @@ def rerank(R, Q, pre, P, first, see_z, mu, sd, sig, real, out):
     return res
 
 
+def siglip():
+    """SigLIP 2 feature functions: sig(pictures) and sigt(texts), unit-normalized, on the CPU"""
+    from transformers import AutoModel, AutoProcessor
+    root = snap(SIGLIP); sm = AutoModel.from_pretrained(root, dtype=torch.float16).to(DEV).eval(); sp = AutoProcessor.from_pretrained(root)
+
+    @torch.no_grad()
+    def sig(ims):
+        f = []
+        for i in range(0, len(ims), 32):
+            o = sm.get_image_features(pixel_values=sp(images=ims[i:i + 32], return_tensors='pt')['pixel_values'].to(DEV).half())
+            f.append(F.normalize((o if torch.is_tensor(o) else o.pooler_output).float(), dim=-1).cpu())
+        return torch.cat(f)
+
+    @torch.no_grad()
+    def sigt(texts):
+        o = sm.get_text_features(**sp(text=texts, padding='max_length', max_length=64, return_tensors='pt').to(DEV))
+        return F.normalize((o if torch.is_tensor(o) else o.pooler_output).float(), dim=-1).cpu()
+    return sig, sigt
+
+
+@torch.no_grad()
+def layers(out, n_train=6000):
+    """which Qwen3-VL-4B layer to read (run with VLENS_READ listing the layers, e.g. 9,15,...,36): one ridge map per
+    layer from the hold activation (the reply start after a caption in a hold wording) to Qwen3-VL-8B's states of the
+    photo, as qimg's hold map. Scored on the test photos (SigLIP 2 rank among them) and on the hidden-thought sets
+    (think, riddle, more: rank among their labels, raw and z). Usage: python -m vlens layers OUT [N_TRAIN]"""
+    out = Path(out); (out / 'pics').mkdir(parents=True, exist_ok=True)
+    Q = Native(); R = Reader(); log('loaded; layers', READ)
+    tr = collect(R, Q, coco_table('train').sample(frac=1, random_state=0).head(int(n_train)), 'tr')
+    te = collect(R, Q, coco_table('test').head(int(os.environ.get('VLENS_QIMG_TEST', 100))), 'te')
+    pre = tr['pre'].to(DEV, BF); d = tr['hold'].shape[1] // len(READ); sig, sigt = siglip(); real = sig(te['ims'])
+    names = [x for x, _ in THINK]
+    sets = dict(think=([THINK_T.format(x=x) for x in names], names), riddle=([RIDDLE_T.format(r=r) for _, r in THINK], names),
+                more=([THINK_T.format(x=x) for x in THINK_MORE], THINK_MORE))
+    acts = {k: R.hold(t) for k, (t, _) in sets.items()}
+    banks = {k: sigt([f'a photo of {x}.' for x in labs]) for k, (_, labs) in sets.items()}
+    draw = lambda P: [Q.picture(torch.cat([pre, p.to(DEV, BF)]), SEED) for p in P]
+    res = dict(layers=list(READ), n_train=len(tr['ims']), n_test=len(te['ims']), sets={k: labs for k, (_, labs) in sets.items()}, rows={})
+    for j, l in enumerate(READ):
+        sl = slice(j * d, (j + 1) * d)
+        f, lam, fve = ridge(tr['hold'][:, sl], tr['tgt'])
+        row = dict(strength=lam, val_fve=round(max(fve.values()), 4), photos=summary(ranks(sig(draw(f(te['hold'][:, sl]))), real)))
+        for k in sets:
+            pics = draw(f(acts[k][:, sl])); q = sig(pics)
+            row[k] = dict(raw=summary(ranks(q, banks[k])), z=summary(ranks_z(q, banks[k])))
+            for i, p in enumerate(pics):
+                p.save(out / 'pics' / f'{k}_{i}_L{l}.jpg', quality=85)
+        del f; torch.cuda.empty_cache()
+        res['rows'][str(l)] = row
+        log('layer', l, 'photos', row['photos']['top1'], {k: (row[k]['raw']['top1'], row[k]['z']['top1']) for k in sets})
+        json.dump(res, open(out / 'layers.json', 'w'), indent=1)
+    log('saved', out / 'layers.json')
+
+
 def qimg(out, n_train=6000):
     out = Path(out); (out / 'pics').mkdir(parents=True, exist_ok=True)
     Q = Native(); R = Reader(); log('loaded; target text', repr(TGT_T))
@@ -202,16 +266,7 @@ def qimg(out, n_train=6000):
         log('drew', name, len(P))
     for i in range(len(te['ims'])):
         te['ims'][i].save(out / 'pics' / f'photo_{i}.jpg', quality=90)
-    from transformers import AutoModel, AutoProcessor
-    root = snap(SIGLIP); sm = AutoModel.from_pretrained(root, dtype=torch.float16).to(DEV).eval(); sp = AutoProcessor.from_pretrained(root)
-
-    @torch.no_grad()
-    def sig(ims):
-        f = []
-        for i in range(0, len(ims), 32):
-            o = sm.get_image_features(pixel_values=sp(images=ims[i:i + 32], return_tensors='pt')['pixel_values'].to(DEV).half())
-            f.append(F.normalize((o if torch.is_tensor(o) else o.pooler_output).float(), dim=-1).cpu())
-        return torch.cat(f)
+    sig, sigt = siglip()
     mu, sd = tr['see'].float().mean(0), tr['see'].float().std(0) + 1e-3     # readback compared standardized
     real = sig(te['ims']); see_z = (te['see'].float() - mu) / sd
     res['scores'] = {}; RB = {}
@@ -221,10 +276,6 @@ def qimg(out, n_train=6000):
         res['scores'][name] = dict(siglip=summary(ranks(sig(P), real)),
                                    readback=summary(ranks((rb - mu) / sd, see_z)))
         log(name, res['scores'][name]); RB[name] = rb.half()
-    @torch.no_grad()
-    def sigt(texts):
-        o = sm.get_text_features(**sp(text=texts, padding='max_length', max_length=64, return_tensors='pt').to(DEV))
-        return F.normalize((o if torch.is_tensor(o) else o.pooler_output).float(), dim=-1).cpu()
     res['explore'] = explore(R, Q, fh, pre, out, sig, sigt)
     res['rerank'] = rerank(R, Q, pre, preds['see'], pics['see'], see_z, mu, sd, sig, real, out)
     save(dict(maps=keep, pre=tr['pre'], target_text=TGT_T, see_mu=mu, see_sd=sd), out / 'qimg_maps.pt')

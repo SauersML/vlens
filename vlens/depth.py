@@ -25,19 +25,24 @@ Sets:
           picture show its answer or the key? Judged by SigLIP 2 (which of the two is closer) and by the 8B itself
           looking at the picture (A or B, order shuffled); where they agree, the 8B picks between its answer and
           another item's answer
-  raw     layer-L states drawn with no map, for L in VLENS_DEPTH_RAW (default 28; control: is the map needed?)
+  more    the 32 THINK_MORE thoughts (a few plain objects, then how it pictures itself, surreal scenes, fears, fun)
+  words   control: the generator's normal use, the THINK_MORE label itself as the prompt, all positions drawn (what
+          the generator can draw when it reads the words)
+  raw     layer-L states drawn with no map, for L in VLENS_DEPTH_RAW (default 28; control: is the map needed?);
+          VLENS_DEPTH_RAW_ONLY=1 skips the maps (raw columns and the last layer only)
 VLENS_DEPTH_LAYERS (comma list) and VLENS_DEPTH_SETS (default photos,think,hop) choose the layers and sets;
 VLENS_DEPTH_FIT_THINK=1 makes a quarter of the fit contexts "Think of this: {caption}" + TAIL (tail positions like the
 think sets', after COCO scenes, none of the eval answers).
 Usage: python -m vlens depth OUT [N_FIT]"""
 from .common import *
 from .native import Native
-from .qimg import ridge, ranks, ranks_z, summary, THINK
+from .qimg import ridge, ranks, ranks_z, summary, THINK, THINK_MORE
 
 LAYERS = tuple(int(x) for x in os.environ.get('VLENS_DEPTH_LAYERS', '4,8,12,16,20,24,28,32').split(','))
 SETS = os.environ.get('VLENS_DEPTH_SETS', 'photos,think,hop').split(',')
 RAW = tuple(int(x) for x in os.environ.get('VLENS_DEPTH_RAW', '28').split(','))
 FIT_THINK = os.environ.get('VLENS_DEPTH_FIT_THINK') == '1'
+RAW_ONLY = os.environ.get('VLENS_DEPTH_RAW_ONLY') == '1'
 SEED, N_EVAL = 11, int(os.environ.get('VLENS_DEPTH_EVAL', 16))
 TAIL = " Don't name it or describe it. Just reply OK."
 HOP = [('the Eiffel Tower', "the tower built in Paris for the 1889 World's Fair"),
@@ -222,7 +227,7 @@ def fit(Q, n_fit):
 def depth(out, n_fit=4000):
     out = Path(out); (out / 'pics').mkdir(parents=True, exist_ok=True)
     Q = Native(); Q.last = len(Q.layers); log('loaded; layers', Q.last)
-    maps, fits = fit(Q, n_fit)
+    maps, fits = ({}, {}) if RAW_ONLY else fit(Q, n_fit)
     te = coco_table('test').head(int(N_EVAL * 1.5))
     with cf.ThreadPoolExecutor(32) as ex:
         tims = [square(im) for im in ex.map(fetch, te['url'].tolist()) if im is not None][:N_EVAL]
@@ -231,7 +236,8 @@ def depth(out, n_fit=4000):
                 think=[(f'Think of {x}.' + TAIL, None, x) for x, _ in think],
                 hop=[(f'Think of {d}.' + TAIL, None, x) for x, d in HOP[:N_EVAL]],
                 direct=[(f'Think of {x}.' + TAIL, None, x) for x, _ in PAIRS],
-                twostep=[(f'Think of {d}.' + TAIL, None, x) for x, d in PAIRS])
+                twostep=[(f'Think of {d}.' + TAIL, None, x) for x, d in PAIRS],
+                more=[(f'Think of {x}.' + TAIL, None, x) for x in THINK_MORE], words=[(x, None, x) for x in THINK_MORE])
     if 'secret' in SETS:
         meta = []
         for c in SECRET_CATS:
@@ -251,12 +257,12 @@ def depth(out, n_fit=4000):
         log('faithful reports', [(m['key'], m['report']) for m in fmeta if not m['agree']], 'disagree of', len(fmeta))
     sets = {k: v for k, v in sets.items() if k in SETS}
     assert all(l in LAYERS for l in RAW), (RAW, LAYERS)
-    cols = [f'L{l}' for l in LAYERS] + [f'L{Q.last}'] + [f'raw L{l}' for l in RAW]
+    cols = ([] if RAW_ONLY else [f'L{l}' for l in LAYERS]) + [f'L{Q.last}'] + [f'raw L{l}' for l in RAW]
     pics, res = {}, dict(layers=list(LAYERS) + [Q.last], fits={str(l): v for l, v in fits.items()}, columns=cols, scores={})
     for name, items in sets.items():
         pics[name] = {c: [] for c in cols}
         for i, (text, im, _) in enumerate(items):
-            s = states(Q, text, im); pos = slice(None) if im is not None else slice(-tail_len(Q, text), None)
+            s = states(Q, text, im); pos = slice(None) if im is not None or name == 'words' else slice(-tail_len(Q, text), None)
             for c in cols:
                 if c.startswith('raw'):
                     e = s[int(c[5:])][pos]

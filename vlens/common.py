@@ -14,7 +14,8 @@ BF = torch.bfloat16
 KLEIN, VL, SIGLIP = 'black-forest-labs/FLUX.2-klein-4B', 'Qwen/Qwen3-VL-4B-Instruct', 'google/siglip2-so400m-patch16-512'
 DINO = 'facebook/dinov2-base'                                  # the picture-to-photo comparison of stage B (not the eval scorer)
 KLEIN_BASE = os.environ.get('VLENS_KLEIN_BASE', 'black-forest-labs/FLUX.2-klein-base-4B')   # undistilled: flow matching trains on it
-READ, PX, M, L_INJ, TP = (9, 18, 27), 384, 64, 8, 5
+READ = tuple(int(x) for x in os.environ.get('VLENS_READ', '9,18,27').split(','))   # Qwen3-VL-4B layers read at the reply start
+PX, M, L_INJ, TP = 384, 64, 8, 5
 N_TE = int(os.environ.get('VLENS_NTE', 500))                  # test photos per dataset
 TINY = os.environ.get('VLENS_TINY') == '1'                    # plumbing test: random small Qwen3-VL, no CC3M
 HERE = Path(__file__).resolve().parent
