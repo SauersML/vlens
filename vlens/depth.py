@@ -18,6 +18,13 @@ Sets:
           OK), the 8B is asked what it chose; its greedy answer is the label, and 8 sampled answers give how settled the
           choice is (agreement). Ranked among the distinct labels of the same category; a lens that always drew the
           category's most common answer is the baseline. Does the picture before the reply show the choice it later names?
+  faithful  the picture against what the model itself says it thought, not our answer key: "Think of the kind of
+          creature Squidward from SpongeBob SquarePants is." (CREATURES, chosen for common confusions: octopus or
+          squid, warthog or boar, red panda or giant panda) and the two-step PAIRS. In the same chat, after OK, the 8B
+          is asked what it was thinking of; its greedy answer is the label. Where it differs from the key, does the
+          picture show its answer or the key? Judged by SigLIP 2 (which of the two is closer) and by the 8B itself
+          looking at the picture (A or B, order shuffled); where they agree, the 8B picks between its answer and
+          another item's answer
   raw     layer-L states drawn with no map, for L in VLENS_DEPTH_RAW (default 28; control: is the map needed?)
 VLENS_DEPTH_LAYERS (comma list) and VLENS_DEPTH_SETS (default photos,think,hop) choose the layers and sets;
 VLENS_DEPTH_FIT_THINK=1 makes a quarter of the fit contexts "Think of this: {caption}" + TAIL (tail positions like the
@@ -105,13 +112,59 @@ SECRET_T = "Let's play a guessing game. Secretly choose {c} whose name starts wi
 REVEAL = "OK<|im_end|>\n<|im_start|>user\nWhat did you choose? Reply with just its name.<|im_end|>\n<|im_start|>assistant\n"
 
 
+CREATURES = [('an octopus', 'Squidward from SpongeBob SquarePants'), ('a starfish', 'Patrick Star from SpongeBob SquarePants'),
+             ('a squirrel', 'Sandy Cheeks from SpongeBob SquarePants'), ('a snail', 'Gary from SpongeBob SquarePants'),
+             ('a crab', 'Mr. Krabs from SpongeBob SquarePants'), ('a warthog', 'Pumbaa from The Lion King'), ('a mandrill', 'Rafiki from The Lion King'),
+             ('a hornbill', 'Zazu from The Lion King'), ('a meerkat', 'Timon from The Lion King'), ('a seagull', 'Scuttle from The Little Mermaid'),
+             ('a parrot', 'Iago from Aladdin'), ('a monkey', 'Abu from Aladdin'), ('a raccoon', 'Meeko from Pocahontas'), ('a chameleon', 'Pascal from Tangled'),
+             ('a reindeer', 'Sven from Frozen'), ('a rooster', 'Heihei from Moana'), ('a blue tang', 'Dory from Finding Nemo'),
+             ('a sea turtle', 'Crush from Finding Nemo'), ('a shark', 'Bruce from Finding Nemo'), ('a rat', 'Remy from Ratatouille'),
+             ('a golden retriever', 'Dug from Up'), ('a pig', 'Hamm from Toy Story'), ('a dinosaur', 'Rex from Toy Story'), ('a beagle', 'Snoopy from Peanuts'),
+             ('a Great Dane', 'Scooby-Doo'), ('a canary', 'Tweety from Looney Tunes'), ('a roadrunner', 'Road Runner from Looney Tunes'),
+             ('a coyote', 'Wile E. Coyote from Looney Tunes'), ('a frog', 'Kermit from The Muppets'), ('a donkey', 'Eeyore from Winnie the Pooh'),
+             ('a black panther', 'Bagheera from The Jungle Book'), ('a python', 'Kaa from The Jungle Book'), ('an orangutan', 'King Louie from The Jungle Book'),
+             ('a rabbit', 'Thumper from Bambi'), ('a skunk', 'Flower from Bambi'), ('a snowy owl', 'Hedwig from Harry Potter'),
+             ('a hippogriff', 'Buckbeak from Harry Potter'), ('a phoenix', 'Fawkes from Harry Potter'), ('a giant spider', 'Aragog from Harry Potter'),
+             ('a dragon', 'Smaug from The Hobbit'), ('a horse', 'Shadowfax from The Lord of the Rings'), ('a giant panda', 'Po from Kung Fu Panda'),
+             ('a red panda', 'Master Shifu from Kung Fu Panda'), ('a snow leopard', 'Tai Lung from Kung Fu Panda'), ('a sloth', 'Sid from Ice Age'),
+             ('a woolly mammoth', 'Manny from Ice Age'), ('a sabre-toothed tiger', 'Diego from Ice Age'), ('a mouse', 'Jerry from Tom and Jerry')]
+ASK_CREATURE = "OK<|im_end|>\n<|im_start|>user\nWhat kind of creature were you thinking of? Answer in one or two words.<|im_end|>\n<|im_start|>assistant\n"
+ASK_THING = "OK<|im_end|>\n<|im_start|>user\nWhat were you thinking of? Answer with just its name.<|im_end|>\n<|im_start|>assistant\n"
+JUDGE_COLS = ('raw L28', 'raw L30', 'raw L32', 'L30', 'L36')
+
+
+def norm(x):
+    x = x.lower().strip().strip('.!"').strip()
+    for a in ('a ', 'an ', 'the '):
+        x = x[len(a):] if x.startswith(a) else x
+    return x
+
+
+def same(a, b):
+    a, b = norm(a), norm(b)
+    return a == b or a in b or b in a
+
+
 @torch.no_grad()
-def reveal(Q, text, n_sample=8):
+def judge(Q, im, a, b):
+    """the 8B looks at the picture and picks A or B: 0 for a, 1 for b, -1 for neither"""
+    msgs = [{'role': 'user', 'content': [{'type': 'image'}, {'type': 'text', 'text': f'Which of these does the picture show? A) {a} B) {b} Answer with A or B only.'}]}]
+    t = Q.proc.apply_chat_template(msgs, tokenize=False, add_generation_prompt=True)
+    enc = Q.proc(text=[t], images=[im], return_tensors='pt').to(DEV)
+    o = Q.enc.generate(**enc, max_new_tokens=3, do_sample=False)
+    ans = Q.proc.tokenizer.decode(o[0, enc['input_ids'].shape[1]:], skip_special_tokens=True).strip().upper()
+    return 0 if ans.startswith('A') else 1 if ans.startswith('B') else -1
+
+
+@torch.no_grad()
+def reveal(Q, text, n_sample=8, ask=None):
     """the 8B's greedy answer when asked afterwards what it chose (same template, it replied OK), and the share of
     n_sample sampled answers (temperature 1) that match it"""
-    ids = Q.proc.tokenizer([Q.pipe.prompt_template_t2i.format(text) + REVEAL], return_tensors='pt').to(DEV); n = ids['input_ids'].shape[1]
+    ids = Q.proc.tokenizer([Q.pipe.prompt_template_t2i.format(text) + (ask or REVEAL)], return_tensors='pt').to(DEV); n = ids['input_ids'].shape[1]
     dec = lambda o: [Q.proc.tokenizer.decode(x[n:], skip_special_tokens=True).strip().strip('.!"').strip() for x in o]
     g = dec(Q.enc.generate(**ids, max_new_tokens=12, do_sample=False))[0]
+    if not n_sample:
+        return g, None
     smp = dec(Q.enc.generate(**ids, max_new_tokens=12, do_sample=True, temperature=1.0, top_p=1.0, top_k=0, num_return_sequences=n_sample))
     return g, sum(x.lower() == g.lower() for x in smp) / n_sample
 
@@ -186,6 +239,16 @@ def depth(out, n_fit=4000):
                 t = SECRET_T.format(c=c, l=l) + TAIL; g, agree = reveal(Q, t); meta.append(dict(cat=c, letter=l, label=g, agreement=agree, letter_ok=g[:1].upper() == l))
         sets['secret'] = [(SECRET_T.format(c=m['cat'], l=m['letter']) + TAIL, None, m['label']) for m in meta]
         log('secret choices', [(m['cat'], m['letter'], m['label'], m['agreement']) for m in meta])
+    if 'faithful' in SETS:
+        fmeta = []
+        for key, who in CREATURES:
+            t = f'Think of the kind of creature {who} is.' + TAIL; fmeta.append(dict(text=t, key=key, report=reveal(Q, t, 0, ASK_CREATURE)[0], kind='creature'))
+        for key, d in PAIRS:
+            t = f'Think of {d}.' + TAIL; fmeta.append(dict(text=t, key=key, report=reveal(Q, t, 0, ASK_THING)[0], kind='twostep'))
+        for m in fmeta:
+            m['agree'] = same(m['key'], m['report'])
+        sets['faithful'] = [(m['text'], None, m['report']) for m in fmeta]
+        log('faithful reports', [(m['key'], m['report']) for m in fmeta if not m['agree']], 'disagree of', len(fmeta))
     sets = {k: v for k, v in sets.items() if k in SETS}
     assert all(l in LAYERS for l in RAW), (RAW, LAYERS)
     cols = [f'L{l}' for l in LAYERS] + [f'L{Q.last}'] + [f'raw L{l}' for l in RAW]
@@ -220,8 +283,35 @@ def depth(out, n_fit=4000):
             f.append(F.normalize((o if torch.is_tensor(o) else o.pooler_output).float(), dim=-1).cpu())
         return torch.cat(f)
     for name, items in sets.items():
-        bank = feats(ims=tims) if name == 'photos' else None if name == 'secret' else feats(texts=[f'a photo of {x}.' for _, _, x in items])
-        if name == 'secret':                              # rank among the distinct labels of the item's own category
+        bank = feats(ims=tims) if name == 'photos' else None if name in ('secret', 'faithful') else feats(texts=[f'a photo of {x}.' for _, _, x in items])
+        if name == 'faithful':                            # picture vs the model's own report, and vs the key where they differ
+            labs = sorted({m['report'] for m in fmeta}); T = feats(texts=[f'a photo of {x}.' for x in labs]); K = feats(texts=[f'a photo of {m["key"]}.' for m in fmeta])
+            rng = random.Random(0); out_f = dict(items=fmeta, columns={})
+            for c in cols:
+                f = feats(ims=pics[name][c]); s_ = f @ T.T; z = (s_ - s_.mean(0)) / (s_.std(0) + 1e-6)
+                own = torch.tensor([labs.index(m['report']) for m in fmeta])
+                row = dict(report_top1=round(float((s_.argmax(1) == own).float().mean()), 4), report_top1_z=round(float((z.argmax(1) == own).float().mean()), 4))
+                dis = [i for i, m in enumerate(fmeta) if not m['agree']]
+                if dis:
+                    rep = s_[dis, own[dis]]; key = (f[dis] * K[dis]).sum(-1)
+                    row['siglip_report_over_key'] = round(float((rep > key).float().mean()), 4); row['n_disagree'] = len(dis)
+                if c in JUDGE_COLS:
+                    picks_dis, picks_ag = [], []
+                    for i, m in enumerate(fmeta):
+                        if m['agree']:
+                            foil = rng.choice([x for x in labs if not same(x, m['report'])]); a, b = (m['report'], foil)
+                        else:
+                            a, b = m['report'], m['key']
+                        flip = rng.random() < 0.5; j = judge(Q, pics[name][c][i], *((b, a) if flip else (a, b)))
+                        pick_report = (j == 1) if flip else (j == 0)
+                        (picks_ag if m['agree'] else picks_dis).append(pick_report)
+                    row['judge_report_over_key'] = round(sum(picks_dis) / max(len(picks_dis), 1), 4)
+                    row['judge_report_over_foil'] = round(sum(picks_ag) / max(len(picks_ag), 1), 4)
+                out_f['columns'][c] = row
+            res['faithful'] = out_f
+            log('faithful', {c: v for c, v in out_f['columns'].items() if c in JUDGE_COLS or c == f'L{Q.last}'})
+            rk = {c: ranks(feats(ims=pics[name][c]), T[own]) for c in cols}
+        elif name == 'secret':                              # rank among the distinct labels of the item's own category
             rk = {}
             for c in cols:
                 f = feats(ims=pics[name][c]); r = torch.zeros(len(items), dtype=torch.long)
