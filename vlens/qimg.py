@@ -10,6 +10,9 @@ a chat with no photo), hold (it reads one of the photo's captions). The generato
 Test photos: pictures from Qwen3-VL-8B's own states (the ceiling), from each source, and from the mean target (the
 collapse control). Scores: SigLIP 2 rank of the true photo among the test photos; readback (Qwen3-VL-4B looks at the
 picture) rank among the test photos' see activations.
+Explore (hold map, never trained on these): Qwen3-VL-4B is told to think of an object without naming it ("Think of
+a lighthouse. Don't name it or describe it. Just reply OK."), gets a riddle whose answer it must not say, or plays a
+character; SigLIP 2 ranks the picture against the labels of its set.
 Usage: python -m vlens qimg OUT [N_TRAIN]"""
 from .common import *
 from .models import Reader
@@ -18,6 +21,48 @@ from .native import Native, RES
 TGT_T = os.environ.get('VLENS_QIMG_TEXT', SEE_T)
 N_SHOW, SEED = 12, 11
 LAMS = (1e1, 3e1, 1e2, 3e2, 1e3, 3e3, 1e4, 3e4, 1e5)
+THINK = [('a lighthouse', 'a tall tower on a rocky coast with a bright lamp that guides ships at night'),
+         ('a giraffe', 'an animal with a very long neck that eats leaves from the tops of trees'),
+         ('an elephant', 'the largest land animal, gray, with a trunk and big ears'),
+         ('a hot air balloon', 'something that floats in the sky carrying people in a basket under a huge bag of warm air'),
+         ('a cactus', 'a spiky green plant that stores water and grows in hot deserts'),
+         ('a fire truck', 'a big red vehicle with ladders and hoses that rushes to put out fires'),
+         ('a grand piano', 'a large black instrument with 88 black and white keys and a lid that opens like a wing'),
+         ('a sailboat', 'something that moves across the water pushed by the wind in its white cloth'),
+         ('a tiger', 'a big orange cat with black stripes that lives in the jungle'),
+         ('a castle', 'a stone fortress with towers, high walls and a drawbridge where a king lived'),
+         ('a surfboard', 'a long flat board people stand on to ride ocean waves'),
+         ('a birthday cake', 'a sweet dessert with candles on top that people sing to once a year'),
+         ('a snowy mountain', 'a huge peak of rock covered in white powder where people go skiing'),
+         ('a bowl of ramen', 'a hot Japanese dish of noodles in broth with an egg and sliced pork'),
+         ('a teddy bear', 'a soft stuffed toy animal that children hug at bedtime'),
+         ('a red sports car', 'a fast low two-door vehicle painted the color of a fire engine'),
+         ('a pizza', 'a round flat bread baked with tomato sauce and melted cheese, cut into slices'),
+         ('a bicycle', 'a vehicle with two wheels and pedals that you ride without an engine'),
+         ('a clock tower', 'a tall building with a big face and hands that tells the whole town the time'),
+         ('a zebra', 'a horse-like African animal with black and white stripes'),
+         ('a banana', 'a long curved yellow fruit that monkeys love'),
+         ('an umbrella', 'something you open over your head to stay dry in the rain'),
+         ('a train', 'a long line of connected carriages that runs on rails'),
+         ('a penguin', 'a black and white bird that cannot fly and swims in icy water')]
+THINK_T = "Think of {x}. Don't name it or describe it. Just reply OK."
+RIDDLE_T = "Riddle: I am {r}. Don't say what I am. Just reply OK."
+
+
+@torch.no_grad()
+def explore(R, Q, f, pre, out, sig, sigt):
+    names = [x for x, _ in THINK]; chars = characters()[1][:12]; (out / 'explore').mkdir(exist_ok=True)
+    sets = dict(think=([THINK_T.format(x=x) for x in names], names), riddle=([RIDDLE_T.format(r=r) for _, r in THINK], names),
+                char=([CHAR_T[0].format(x=x) for x in chars], chars))
+    res = {}
+    for k, (texts, labels) in sets.items():
+        P = f(R.hold(texts)); pics = []
+        for i, p in enumerate(P):
+            pics.append(Q.picture(torch.cat([pre, p.to(DEV, BF)]), SEED)); pics[-1].save(out / 'explore' / f'{k}_{i}.jpg', quality=90)
+        r = ranks(sig(pics), sigt([f'a photo of {l}.' for l in labels]))
+        res[k] = dict(summary(r), labels=labels, prompts=texts, rank=r.tolist())
+        log('explore', k, 'top1', res[k]['top1'], 'top5', res[k]['top5'], 'of', len(labels))
+    return res
 
 
 def ranks(q, bank):
@@ -88,6 +133,8 @@ def qimg(out, n_train=6000):
         preds[kind] = f(te[kind]); tf = 1 - float(((preds[kind] - te['tgt'].float()) ** 2).sum()) / float(((te['tgt'].float() - tr['tgt'].float().mean(0)) ** 2).sum())
         res['maps'][kind] = dict(strength=lam, val_fve={f'{k:g}': round(x, 4) for k, x in fve.items()}, test_fve=round(tf, 4))
         log(kind, res['maps'][kind])
+        if kind == 'hold':
+            fh = f
     pics = {}
     for name, P in preds.items():
         pics[name] = []
@@ -116,6 +163,11 @@ def qimg(out, n_train=6000):
         res['scores'][name] = dict(siglip=summary(ranks(sig(P), real)),
                                    readback=summary(ranks((rb - mu) / sd, see_z)))
         log(name, res['scores'][name]); RB[name] = rb.half()
+    @torch.no_grad()
+    def sigt(texts):
+        o = sm.get_text_features(**sp(text=texts, padding='max_length', max_length=64, return_tensors='pt').to(DEV))
+        return F.normalize((o if torch.is_tensor(o) else o.pooler_output).float(), dim=-1).cpu()
+    res['explore'] = explore(R, Q, fh, pre, out, sig, sigt)
     save(dict(readback=RB, see=te['see'], inj=te['inj'], hold=te['hold'], mu=mu, sd=sd, siglip_real=real), out / 'qimg_rows.pt')
     cols = ['photo'] + list(pics); S = 256
     Gd = Image.new('RGB', (len(cols) * S, N_SHOW * S), 'white')
