@@ -10,6 +10,10 @@ ridge map), plus the mean state. Losses:
           before k without gradient, then that step's estimate of the clean picture, decoded) is read back by
           Qwen3-VL-4B in the see chat and has to pick out its own source activation among the batch and BANK train
           sources (InfoNCE on standardized activations, the pictures' running mean readback removed first); see only
+  rft     NLA style, no photo, self-distillation (rejection-sampling fine-tuning): RFT_K pictures per source from the
+          adapter's own states (the full 8-step sampler, no gradient), Qwen3-VL-4B reads each back in the see chat, the
+          one closest to the source activation (standardized cosine, a choice among draws of one source, so the
+          pictures' shared offset cancels) is kept, and the flow-matching loss on its latents trains the adapter; see only
   anchor  mean squared distance of the states from the ridge map's
 Kinds: see (the 4B looked at the photo) or hold (the 4B read one of its captions in a HOLD_TR wording).
 Eval on qimg's 100 COCO test photos with qimg's seed and size, ridge map vs trained: SigLIP 2 rank of each picture among
@@ -28,6 +32,7 @@ STEPS, MINUTES = int(os.environ.get('VLENS_PNLA_STEPS', 4000)), float(os.environ
 BS, RB_BS, LR = int(os.environ.get('VLENS_PNLA_BS', 8)), int(os.environ.get('VLENS_PNLA_RBBS', 4)), float(os.environ.get('VLENS_PNLA_LR', 2e-4))
 KMIN, BANK, TAU = int(os.environ.get('VLENS_PNLA_KMIN', 2)), 4096, 0.07
 RERANK = int(os.environ.get('VLENS_PNLA_RERANK', 4))
+RFT_K, RFT_BS = int(os.environ.get('VLENS_PNLA_RFT', 0)), int(os.environ.get('VLENS_PNLA_RFTBS', 4))
 N_TEST, N_SHOW, SEED = int(os.environ.get('VLENS_QIMG_TEST', 100)), 12, 11
 STORIES = [['A family drives to a sunny beach and opens a red umbrella.', 'The kids build a sandcastle near the water.',
             'A dog runs along the shore chasing seagulls.', 'Dark clouds roll in over the sea.',
@@ -35,7 +40,7 @@ STORIES = [['A family drives to a sunny beach and opens a red umbrella.', 'The k
            ['A baker cracks eggs into a bowl of flour in a small kitchen.', 'She pours the batter into a round pan and puts it in the oven.',
             'The cake comes out of the oven golden brown.', 'She covers it with white frosting and strawberries.',
             'Candles are lit on the cake at a birthday party.', 'A little girl blows out the candles while her friends clap.']]
-assert KIND in ('see', 'hold') and not (W_RB and KIND != 'see')
+assert KIND in ('see', 'hold') and not ((W_RB or RFT_K) and KIND != 'see')
 
 
 class Gen:
@@ -260,7 +265,7 @@ def pnla(out, maps, n_train=12000):
     tr = collect(R, G, coco_table('train').sample(frac=1, random_state=0).head(int(n_train)), False)
     log('train photos', len(tr['caps']), 'sources', len(tr['src']), 'latents', tuple(tr['z'].shape), 'test photos', len(te['caps']))
     sig, sigt = siglip(); real = sig(te['ims']); see_z = (te['see'].float() - mu) / sd
-    res = dict(kind=KIND, weights=dict(fm=W_FM, rb=W_RB, anchor=W_ANC), train_px=TR_PX, eval_px=EV_PX, n_train=len(tr['caps']), n_sources=len(tr['src']),
+    res = dict(kind=KIND, weights=dict(fm=W_FM, rb=W_RB, anchor=W_ANC, rft_k=RFT_K, rft_batch=RFT_BS), train_px=TR_PX, eval_px=EV_PX, n_train=len(tr['caps']), n_sources=len(tr['src']),
                lr=LR, batch=BS, rb_batch=RB_BS, kmin=KMIN, tau=TAU, bank=BANK)
     res['ridge'], pr = evaluate(R, G, A, te, True, sig, real, see_z, mu, sd, out)
     params = [p for p in A.parameters() if p.requires_grad]
@@ -293,6 +298,22 @@ def pnla(out, maps, n_train=12000):
             logits = q @ torch.cat([zb[IDX[b[:n]]], zb[torch.randint(len(zb), (BANK,), device=DEV)]]).T / TAU
             parts['rb'] = F.cross_entropy(logits, torch.arange(n, device=DEV)); loss = loss + W_RB * parts['rb']
             parts['rb_top1'] = (logits.argmax(1) == torch.arange(n, device=DEV)).float().mean()
+        if RFT_K:
+            n = RFT_BS; Cb = C[:n]
+            with torch.no_grad():
+                Ck = Cb.detach().to(BF).repeat(RFT_K, 1, 1)                                      # [K*n]: draw k of source i at k*n+i
+                xk = G.run(Ck, G.noise(torch.randint(1 << 30, (RFT_K * n,)).tolist(), TR_PX), 0, len(sigs))
+                img = torch.cat([G.decode(xk[i:i + 8]) for i in range(0, len(xk), 8)])
+                if TR_PX != PX:
+                    img = F.interpolate(img, size=(PX, PX), mode='bilinear', antialias=True)
+                q = F.normalize((R.see(img) - mu_d) / sd_d, dim=-1).view(RFT_K, n, -1)
+                cos = (q * zb[IDX[b[:n]]][None]).sum(-1)                                          # [K, n]
+                best = cos.argmax(0); z0 = xk.view(RFT_K, n, *xk.shape[1:])[best, torch.arange(n, device=DEV)].float()
+            eps = torch.randn_like(z0); s = sigs[torch.randint(len(sigs), (n,), device=DEV)]
+            v = G.v(((1 - s)[:, None, None] * z0 + s[:, None, None] * eps).to(BF), s, Cb.to(BF))
+            parts['rft'] = ((v.float() - (eps - z0)) ** 2).mean(); loss = loss + parts['rft']
+            parts['rft_gain'] = cos.max(0).values.mean() - cos.mean()                               # reward of the kept draw over the average draw
+            parts['rft_cos'] = cos.mean()
         opt.zero_grad(set_to_none=True); loss.backward(); gn = torch.nn.utils.clip_grad_norm_(params, 1.0); opt.step()
         for kk, x in dict(parts, grad_norm=gn).items():
             acc.setdefault(kk, []).append(float(x))
