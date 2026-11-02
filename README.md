@@ -111,7 +111,7 @@ rubber duck in the ocean a rubber duck on water. Thoughts without a clear object
 upside down, heaven) and thoughts about the model itself (yourself, how humans see you, the person who created you,
 your worst nightmare) mostly come out as the same toy figure in overalls, which is also the picture of "Think of
 yourself."; "what you look like" is a black-and-white portrait of a man. Run-to-run variation on the same seed is
-several points (layer 30: 44% and 31% in two runs).
+several points (layer 30: 44% and 50% in two runs with seed 11).
 
 ![the 12 surreal scenes](docs/think_surreal.png)
 
