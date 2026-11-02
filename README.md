@@ -156,6 +156,8 @@ the same 100 test photos, seed and size as above.
 | reads a caption, ridge map (start) | 22% | 50% | 11% | |
 | reads a caption, Turbo's flow-matching loss on the photo | 15% | 44% | 10% | 17% |
 | reads a caption, Turbo's own path from the caption text (teach) | 24% | 68% | 10% | 25% |
+| the same, 100 more minutes | 32% | 70% | 10% | 33% |
+| the same, half the training captions in the thought wording | 36% | 72% | 8% | 40% |
 | (the caption text itself, drawn by Turbo: the ceiling for teach) | 70% | 94% | | |
 
 From the see chat the trained pictures match the photos' layout and colour far better than the 8B's own states do
@@ -166,7 +168,22 @@ of the plausible pictures, and a caption allows many. What fixed the caption pic
 encoding by Qwen3-VL-8B) from seeded noise, and the adapter's states have to give Turbo's velocity at every point of
 that 8-step path (`VLENS_PNLA_TEACH`). After 65 minutes the pictures are sharp scenes again, top-5 rises from 50% to
 68%, and on hidden thoughts top-5 rises from 50% to 71% (think) and from 50% to 62% (riddle) at the same top-1 (29%,
-21%). Taking the loss from the undistilled base model
+21%). The caption pictures are sharp but often stock scenes: the same bathroom for four different bathroom photos, the
+same two people on a street for "a man on a bicycle next to a train" and "people on bicycles ride down a busy street".
+The kind of scene comes through and details (the bicycle, the candle) often do not, which is why top-5 rises more than
+top-1. Turbo drawing the caption text itself keeps those details, so they are lost in the 4B's single activation or
+in the adapter.
+
+![hidden thoughts of Qwen3-VL-4B](docs/pnla_thoughts.png)
+
+With half the training captions worded like the thought prompts ("Think of this: {caption} Don't name it or describe
+it. Just reply OK."), the "Think of X" prompts give the right object top-1 among 24 for 79% (plain ranks 71%), against
+38% (29%) for the ridge map and 54% (38%) for the same training in the caption wordings only. The figure shows all 24
+in order. Riddles, a wording never trained, do not improve (25% against 33%), and many of the 24 objects are common
+COCO subjects (giraffe, zebra, pizza, train). Hidden-thought ranks here are over labels with each label's offset
+removed, as in the depth lens below.
+
+Taking the loss from the undistilled base model
 (Qwen/Qwen-Image-2.1) instead, with Turbo still drawing, made both kinds worse within 15 minutes (quick eval on 32
 test photos: from the photo 38% to 16% top-1, from a caption 19% to 3%); stopped.
 
