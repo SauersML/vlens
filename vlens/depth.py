@@ -28,6 +28,9 @@ Sets:
   more    the 32 THINK_MORE thoughts (a few plain objects, then how it pictures itself, surreal scenes, fears, fun)
   words   control: the generator's normal use, the THINK_MORE label itself as the prompt, all positions drawn (what
           the generator can draw when it reads the words)
+  vivid   the THINK_MORE thoughts asked for as a strong visual image (VIVID) instead of "Think of {x}."
+  setup   the same, after the model is told the whole setup (SETUP: an image generator draws its states after the
+          thought, never the text); compared with more, does knowing what is read out change what is drawn?
   raw     layer-L states drawn with no map, for L in VLENS_DEPTH_RAW (default 28; control: is the map needed?);
           VLENS_DEPTH_RAW_ONLY=1 skips the maps (raw columns and the last layer only)
 VLENS_DEPTH_LAYERS (comma list) and VLENS_DEPTH_SETS (default photos,think,hop) choose the layers and sets;
@@ -45,6 +48,10 @@ FIT_THINK = os.environ.get('VLENS_DEPTH_FIT_THINK') == '1'
 RAW_ONLY = os.environ.get('VLENS_DEPTH_RAW_ONLY') == '1'
 SEED, N_EVAL = 11, int(os.environ.get('VLENS_DEPTH_EVAL', 16))
 TAIL = " Don't name it or describe it. Just reply OK."
+VIVID = 'Strongly visually imagine {x}: see it in vivid detail, its shapes, colors and setting, and hold that picture in mind.'
+SETUP = ('Here is how this works. An image generator, Qwen-Image-2.1, reads your internal states at one of your later layers, '
+         'at the words that come after the thing you imagine, and draws a picture from them. It never sees this text, only '
+         'your states, so whatever you hold vividly in mind there is what gets drawn. ')
 HOP = [('the Eiffel Tower', "the tower built in Paris for the 1889 World's Fair"),
        ('a bald eagle', 'the national bird of the United States'),
        ('an apple', "the fruit said to have fallen on Isaac Newton's head"),
@@ -237,7 +244,9 @@ def depth(out, n_fit=4000):
                 hop=[(f'Think of {d}.' + TAIL, None, x) for x, d in HOP[:N_EVAL]],
                 direct=[(f'Think of {x}.' + TAIL, None, x) for x, _ in PAIRS],
                 twostep=[(f'Think of {d}.' + TAIL, None, x) for x, d in PAIRS],
-                more=[(f'Think of {x}.' + TAIL, None, x) for x in THINK_MORE], words=[(x, None, x) for x in THINK_MORE])
+                more=[(f'Think of {x}.' + TAIL, None, x) for x in THINK_MORE], words=[(x, None, x) for x in THINK_MORE],
+                vivid=[(VIVID.format(x=x) + TAIL, None, x) for x in THINK_MORE],
+                setup=[(SETUP + VIVID.format(x=x) + TAIL, None, x) for x in THINK_MORE])
     if 'secret' in SETS:
         meta = []
         for c in SECRET_CATS:
