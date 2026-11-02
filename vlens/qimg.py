@@ -135,12 +135,19 @@ def qimg(out, n_train=6000):
         log(kind, res['maps'][kind])
         if kind == 'hold':
             fh = f
+        del f
+    d = tr['see'].shape[1] // len(READ)                                # one layer at a time: which depth carries it
+    for kind in ('see', 'hold'):
+        for j, l in enumerate(READ):
+            sl = slice(j * d, (j + 1) * d)
+            f, lam, fve = ridge(tr[kind][:, sl], tr['tgt']); preds[f'{kind} L{l}'] = f(te[kind][:, sl]); del f
+            res['maps'][f'{kind} L{l}'] = dict(strength=lam, val_fve=round(max(fve.values()), 4)); log(kind, 'layer', l, res['maps'][f'{kind} L{l}'])
     pics = {}
     for name, P in preds.items():
         pics[name] = []
         for i in range(len(P)):
             p = Q.picture(torch.cat([pre, P[i].to(DEV, BF)]), SEED); pics[name].append(p)
-            p.save(out / 'pics' / f'{name}_{i}.jpg', quality=90 if i < N_SHOW else 80)
+            p.save(out / 'pics' / f'{name.replace(" ", "_")}_{i}.jpg', quality=90 if i < N_SHOW else 80)
         log('drew', name, len(P))
     for i in range(len(te['ims'])):
         te['ims'][i].save(out / 'pics' / f'photo_{i}.jpg', quality=90)
