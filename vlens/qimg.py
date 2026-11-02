@@ -122,7 +122,12 @@ def ridge(X, Y):
     return f, best, fve
 
 
-def low_rank(f, r=512):
+def apply_low(k, A):
+    """a kept map applied to activations A -> [len(A), T, D]"""
+    return (((A.float() - k['mu']) / k['sd']) @ k['U'].float() @ k['V'].float().T).view(len(A), *k['ym'].shape) + k['ym']
+
+
+def low_rank(f, r=int(os.environ.get('VLENS_QIMG_RANK', 1024))):
     """the map at rank r, small enough to keep (U [d,r] and V [m,r] in fp16 plus the standardization)"""
     W, mu, sd, ym = f.parts; U, S, V = torch.svd_lowrank(W, q=r + 16, niter=4)
     return dict(U=(U[:, :r] * S[:r]).half().cpu(), V=V[:, :r].half().cpu(), mu=mu, sd=sd, ym=ym)
@@ -170,7 +175,8 @@ def qimg(out, n_train=6000):
         if kind == 'hold':
             fh = f
         if kind in ('see', 'hold'):
-            keep[kind] = low_rank(f)
+            keep[kind] = low_rank(f); lp = apply_low(keep[kind], te[kind])
+            log(kind, 'kept at rank', keep[kind]['U'].shape[1], 'test fve', round(1 - float(((lp - te['tgt'].float()) ** 2).sum()) / float(((te['tgt'].float() - tr['tgt'].float().mean(0)) ** 2).sum()), 4))
         del f
     d = tr['see'].shape[1] // len(READ)                                # one layer at a time: which depth carries it
     for kind in ('see', 'hold'):
