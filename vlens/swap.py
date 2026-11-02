@@ -112,27 +112,36 @@ def swap(out):
             o = sm.get_image_features(pixel_values=sp(images=[pics[(r['pair'], r['lp'], r['a'], r['col'])]], return_tensors='pt')['pixel_values'].to(DEV).half())
             f = F.normalize((o if torch.is_tensor(o) else o.pooler_output).float(), dim=-1).cpu()[0]
             r['sig'] = round(float(f @ tf[names.index(r['y'])] - f @ tf[names.index(r['x'])]), 4)
-    res = dict(lp=LP, alpha=ALPHA, cols=list(COLS) + [Q.last], pairs=pairs, rows=rows, scores={})
-    for c in res['cols']:
-        aucs, jacc, base, n_cells = [], [], [], 0
-        for lp in LP:
-            for a in ALPHA:
-                cell = [r for r in rows if r['lp'] == lp and r['a'] == a and r['col'] == c]
-                if not cell:
-                    continue
-                pos = [r['sig'] for r in cell if r['fc'] > 0]; neg = [r['sig'] for r in cell if r['fc'] <= 0]
-                if len(pos) >= 5 and len(neg) >= 5:
-                    aucs.append(sum((p > q) + 0.5 * (p == q) for p in pos for q in neg) / (len(pos) * len(neg))); n_cells += 1
-                jj = [r for r in cell if r['judge_y'] is not None]
-                jacc += [r['judge_y'] == (r['fc'] > 0) for r in jj]
-                base += [max(len(pos), len(neg)) / len(cell)] * len(jj)
-        res['scores'][str(c)] = dict(siglip_auc_within_cell=round(sum(aucs) / max(len(aucs), 1), 4), n_cells=n_cells,
-                                     judge_agrees_with_model=round(sum(jacc) / max(len(jacc), 1), 4),
-                                     cell_majority=round(sum(base) / max(len(base), 1), 4))
-    flips = {f'{lp}_{a}': round(sum(r['fc'] > 0 for r in rows if r['lp'] == lp and r['a'] == a and r['col'] == Q.last) / len(pairs), 3)
-             for lp in LP for a in ALPHA}
-    res['model_says_y'] = flips; res['model_says_y_unpatched'] = round(sum(r['fc'] > 0 for r in rows if r['a'] == 0 and r['col'] == Q.last) / len(pairs), 3)
-    log('model says y', res['model_says_y_unpatched'], flips)
-    log('swap', res['scores'])
+    res = score(dict(lp=LP, alpha=ALPHA, cols=list(COLS) + [Q.last], pairs=pairs, rows=rows))
+    log('model says y', res['model_says_y']); log('swap', res['scores'])
     json.dump(res, open(out / 'swap.json', 'w'), indent=1)
     log('saved', out / 'swap.json')
+
+
+def score(res):
+    """the model's side is its free answer (y, x, or neither: dropped). The forced choice is kept in the rows but not
+    scored: it never moved (both names are in the question, and the model can match them against the prompt's words,
+    which are mixed only from LP on). Per (LP, a, column) cell: AUC of SigLIP Y-minus-X for answers y against x, pooled
+    over cells by their pair counts (a random y answer and a random x answer from the same cell, ordered right), and
+    the 8B judge's and SigLIP's sign agreement with the answer against the cell's majority answer."""
+    rows = [r for r in res['rows'] if r['free_side'] in ('x', 'y')]; out = {}
+    for c in res['cols']:
+        num = den = 0; agree_j = agree_s = maj = n_j = n = 0
+        for lp in res['lp']:
+            for a in res['alpha']:
+                cell = [r for r in rows if r['lp'] == lp and r['a'] == a and r['col'] == c]
+                pos = [r['sig'] for r in cell if r['free_side'] == 'y']; neg = [r['sig'] for r in cell if r['free_side'] == 'x']
+                num += sum((p > q) + 0.5 * (p == q) for p in pos for q in neg); den += len(pos) * len(neg)
+                m = max(len(pos), len(neg)); maj += m; n += len(cell)
+                agree_s += sum((r['sig'] > 0) == (r['free_side'] == 'y') for r in cell)
+                jj = [r for r in cell if r['judge_y'] is not None]; n_j += len(jj)
+                agree_j += sum(bool(r['judge_y']) == (r['free_side'] == 'y') for r in jj)
+        out[str(c)] = dict(siglip_auc_within_cell=round(num / max(den, 1), 4), n_pairs_compared=den,
+                           judge_agrees=round(agree_j / max(n_j, 1), 4), siglip_sign_agrees=round(agree_s / max(n, 1), 4),
+                           cell_majority=round(maj / max(n, 1), 4), n=n)
+    last = res['cols'][-1]; cells = lambda lp, a: [r for r in res['rows'] if r['lp'] == lp and r['a'] == a and r['col'] == last]
+    res['model_says_y'] = {f'{lp}_{a}': round(sum(r['free_side'] == 'y' for r in cells(lp, a)) / max(len(cells(lp, a)), 1), 3)
+                           for lp, a in [(0, 0.0)] + [(lp, a) for lp in res['lp'] for a in res['alpha']]}
+    res['model_says_neither'] = round(sum(r['free_side'] == '-' for r in res['rows'] if r['col'] == last) / max(sum(r['col'] == last for r in res['rows']), 1), 3)
+    res['scores'] = out
+    return res
