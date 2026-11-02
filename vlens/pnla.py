@@ -28,6 +28,12 @@ STEPS, MINUTES = int(os.environ.get('VLENS_PNLA_STEPS', 4000)), float(os.environ
 BS, RB_BS, LR = int(os.environ.get('VLENS_PNLA_BS', 8)), int(os.environ.get('VLENS_PNLA_RBBS', 4)), float(os.environ.get('VLENS_PNLA_LR', 2e-4))
 KMIN, BANK, TAU = int(os.environ.get('VLENS_PNLA_KMIN', 2)), 4096, 0.07
 N_TEST, N_SHOW, SEED = int(os.environ.get('VLENS_QIMG_TEST', 100)), 12, 11
+STORIES = [['A family drives to a sunny beach and opens a red umbrella.', 'The kids build a sandcastle near the water.',
+            'A dog runs along the shore chasing seagulls.', 'Dark clouds roll in over the sea.',
+            'Lightning flashes and everyone runs to the car.', 'At night the beach is empty under a full moon.'],
+           ['A baker cracks eggs into a bowl of flour in a small kitchen.', 'She pours the batter into a round pan and puts it in the oven.',
+            'The cake comes out of the oven golden brown.', 'She covers it with white frosting and strawberries.',
+            'Candles are lit on the cake at a birthday party.', 'A little girl blows out the candles while her friends clap.']]
 assert KIND in ('see', 'hold') and not (W_RB and KIND != 'see')
 
 
@@ -189,7 +195,8 @@ def evaluate(R, G, A, te, ridge, sig, real, see_z, mu, sd, out):
 
 @torch.no_grad()
 def explore(R, G, A, sig, sigt, out):
-    """hidden thoughts through the hold adapter: think / riddle / character prompts, ranked among their labels"""
+    """hidden thoughts through the hold adapter: think / riddle / character prompts, ranked among their labels; and
+    stories read one sentence at a time (the state after each prefix in HOLD_TR[0], drawn)"""
     from .common import characters
     names = [x for x, _ in THINK]; chars = characters()[1][:12]
     sets = dict(think=([THINK_T.format(x=x) for x in names], names), riddle=([RIDDLE_T.format(r=r) for _, r in THINK], names),
@@ -204,6 +211,14 @@ def explore(R, G, A, sig, sigt, out):
                 p.save(out / 'pics' / f'{k}_{tag}_{i}.jpg', quality=90)
             res[k][tag] = summary(ranks(sig(P), bank))
         log('explore', k, {t: (res[k][t]['top1'], res[k][t]['top5']) for t in ('ridge', 'trained')}, 'of', len(labels))
+    for j, story in enumerate(STORIES):
+        H = R.hold([HOLD_TR[0].format(c=' '.join(story[:n + 1])) for n in range(len(story))])
+        for ridge in (True, False):
+            tag = 'ridge' if ridge else 'trained'; C = A(H.to(DEV), ridge).cpu()
+            pics['story', j, tag] = [G.picture(C[i], SEED) for i in range(len(C))]
+            for i, p in enumerate(pics['story', j, tag]):
+                p.save(out / 'pics' / f'story{j}_{tag}_{i}.jpg', quality=90)
+    res['stories'] = STORIES
     return res, pics
 
 
@@ -277,5 +292,6 @@ def pnla(out, maps, n_train=12000):
         res['explore'], ep = explore(R, G, A, sig, sigt, out)
         n = len(THINK)
         grid([[ep['think', 'ridge'][i], ep['think', 'trained'][i], ep['riddle', 'ridge'][i], ep['riddle', 'trained'][i]] for i in range(n)], out / 'pnla_thoughts.jpg')
+        grid([ep['story', j, t] for j in range(len(STORIES)) for t in ('ridge', 'trained')], out / 'pnla_stories.jpg')
     json.dump(res, open(out / 'pnla.json', 'w'), indent=1)
     log('saved', out / 'pnla.json')
