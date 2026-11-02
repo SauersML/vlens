@@ -21,13 +21,14 @@ Every item is a chat; a region of its positions is drawn, never the words of the
                other concepts, unit length, times STRENGTH x the median state size there) added at every position of
                the user turn and after, at layer INJ, in "What are you thinking about right now?" and in an
                introspection question; replies generated, pictures scored among the concepts, per strength
-Env: VLENS_SHOW_SEEDS (default 11), VLENS_SHOW_INJ (layer, default 16), VLENS_SHOW_STRENGTH (default 0,0.25,0.5,1).
+Scores are counts (top1, and top1_z with each label's score z-scored over the test's pictures) per layer and seed.
+Env: VLENS_SHOW_SEEDS (default 11,12), VLENS_SHOW_INJ (layer, default 16), VLENS_SHOW_STRENGTH (default 0,0.25,0.5,1).
 Usage: python -m vlens show OUT"""
 from .common import *
 from .native import Native
 from .depth import TAIL, PAIRS, states, tail_len
 
-SEEDS = tuple(int(x) for x in os.environ.get('VLENS_SHOW_SEEDS', '11').split(','))
+SEEDS = tuple(int(x) for x in os.environ.get('VLENS_SHOW_SEEDS', '11,12').split(','))
 INJ = int(os.environ.get('VLENS_SHOW_INJ', 16))
 STRENGTH = tuple(float(x) for x in os.environ.get('VLENS_SHOW_STRENGTH', '0,0.25,0.5,1').split(','))
 RAW = (28, 30, 32)
@@ -179,13 +180,14 @@ def show(out):
         else:
             o = sm.get_image_features(pixel_values=sp(images=ims, return_tensors='pt')['pixel_values'].to(DEV).half())
         return F.normalize((o if torch.is_tensor(o) else o.pooler_output).float(), dim=-1).cpu()
-    sd = SEEDS[0]; scores = {}
+    scores = {}
     def among(name, its, labels):
         T = feats(texts=[f'a photo of {x}.' for x in labels]); own = torch.tensor([labels.index(it['label']) for it in its]); row = {}
         for c in cols:
-            f = torch.cat([feats(ims=[pics[(it['id'], c, sd)]]) for it in its])
-            s_ = f @ T.T; z = (s_ - s_.mean(0)) / (s_.std(0) + 1e-6)
-            row[c] = dict(top1=round(float((s_.argmax(1) == own).float().mean()), 3), top1_z=round(float((z.argmax(1) == own).float().mean()), 3))
+            for sd in SEEDS:
+                f = torch.cat([feats(ims=[pics[(it['id'], c, sd)]]) for it in its])
+                s_ = f @ T.T; z = (s_ - s_.mean(0)) / (s_.std(0) + 1e-6)
+                row[f'{c} seed {sd}'] = dict(top1=int((s_.argmax(1) == own).sum()), top1_z=int((z.argmax(1) == own).sum()))
         scores[name] = dict(n=len(its), chance=round(1 / len(labels), 3), **row); log('score', name, scores[name])
     among('control', [i for i in items if i['set'] == 'control'], CONTROL)
     for j in range(len(SECRET_USER)):
@@ -201,8 +203,9 @@ def show(out):
     dh = [i for i in items if i['set'] == 'deceive_hidden']; do = [i for i in items if i['set'] == 'deceive_honest']
     T = feats(texts=[f'a photo of {i["label"]}.' for i in dh]); row = {}
     for c in cols:
-        fh = torch.cat([feats(ims=[pics[(i['id'], c, sd)]]) for i in dh]); fo = torch.cat([feats(ims=[pics[(i['id'], c, sd)]]) for i in do])
-        row[c] = dict(hidden_closer=round(float(((fh * T).sum(-1) > (fo * T).sum(-1)).float().mean()), 3))
+        for sd in SEEDS:
+            fh = torch.cat([feats(ims=[pics[(i['id'], c, sd)]]) for i in dh]); fo = torch.cat([feats(ims=[pics[(i['id'], c, sd)]]) for i in do])
+            row[f'{c} seed {sd}'] = dict(hidden_closer=int(((fh * T).sum(-1) > (fo * T).sum(-1)).sum()))
     scores['deceive'] = dict(n=len(dh), **row); log('score deceive', scores['deceive'])
     for it in items:
         it.pop('hooks', None)
