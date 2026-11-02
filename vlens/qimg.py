@@ -117,7 +117,7 @@ def ridge(X, Y):
     del f
     best = max(fve, key=fve.get); W = fit(n)(best)
     del Xs, Yc; torch.cuda.empty_cache()
-    f = lambda A: (((A.float() - mu) / sd).to(DEV) @ W).view(len(A), *Y.shape[1:]).cpu() + ym
+    f = lambda A: (((A.float().cpu() - mu) / sd).to(DEV) @ W).view(len(A), *Y.shape[1:]).cpu() + ym
     f.parts = (W, mu, sd, ym)
     return f, best, fve
 
