@@ -122,6 +122,8 @@ states (ceiling) and the mean target (collapse control).
 | Qwen3-VL-4B reads only a caption (hold) | 22% (13%) | 50% (33%) | 4 |
 | the mean target (draws the same dog every time) | 1% | 5% | 49 |
 
+![best of 4 by readback](docs/readback_choice.png)
+
 Best of 4 by readback is the NLA-style choice with no training: four pictures per photo with different noise, and
 Qwen3-VL-4B keeps the one whose reading of it, in the same see chat, is closest to its own activation on the photo.
 It lifts top-1 from 33% to 49%, past the 8B's own states; choosing with the photo itself (not available to a reader)
