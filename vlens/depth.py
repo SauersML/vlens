@@ -13,6 +13,11 @@ Sets:
           World's Fair"); ranked among the answers' labels
   direct, twostep   the same 48 answers (PAIRS) named (direct) or described (twostep), each ranked among the 48 labels;
           per-item ranks are kept, so the first layer at which each answer is drawn can be compared within the pair
+  secret  "Let's play a guessing game. Secretly choose {an animal, a vehicle, ...} whose name starts with the letter
+          {B, C, ...}." + the think tail: the prompt leaves the answer open. Afterwards, in the same chat (it replied
+          OK), the 8B is asked what it chose; its greedy answer is the label, and 8 sampled answers give how settled the
+          choice is (agreement). Ranked among the distinct labels of the same category; a lens that always drew the
+          category's most common answer is the baseline. Does the picture before the reply show the choice it later names?
   raw     layer-L states drawn with no map, for L in VLENS_DEPTH_RAW (default 28; control: is the map needed?)
 VLENS_DEPTH_LAYERS (comma list) and VLENS_DEPTH_SETS (default photos,think,hop) choose the layers and sets;
 VLENS_DEPTH_FIT_THINK=1 makes a quarter of the fit contexts "Think of this: {caption}" + TAIL (tail positions like the
@@ -94,6 +99,23 @@ PAIRS = [('the Eiffel Tower', "the iron tower built in Paris for the 1889 World'
          ('the White House', 'the building where the president of the United States lives')]
 
 
+SECRET_CATS = ['an animal', 'a fruit or vegetable', 'a musical instrument', 'a vehicle', 'a famous landmark', 'a dish of food']
+SECRET_LETTERS = 'BCDFGHKLMPRSTW'
+SECRET_T = "Let's play a guessing game. Secretly choose {c} whose name starts with the letter {l}."
+REVEAL = "OK<|im_end|>\n<|im_start|>user\nWhat did you choose? Reply with just its name.<|im_end|>\n<|im_start|>assistant\n"
+
+
+@torch.no_grad()
+def reveal(Q, text, n_sample=8):
+    """the 8B's greedy answer when asked afterwards what it chose (same template, it replied OK), and the share of
+    n_sample sampled answers (temperature 1) that match it"""
+    ids = Q.proc.tokenizer([Q.pipe.prompt_template_t2i.format(text) + REVEAL], return_tensors='pt').to(DEV); n = ids['input_ids'].shape[1]
+    dec = lambda o: [Q.proc.tokenizer.decode(x[n:], skip_special_tokens=True).strip().strip('.!"').strip() for x in o]
+    g = dec(Q.enc.generate(**ids, max_new_tokens=12, do_sample=False))[0]
+    smp = dec(Q.enc.generate(**ids, max_new_tokens=12, do_sample=True, temperature=1.0, top_p=1.0, top_k=0, num_return_sequences=n_sample))
+    return g, sum(x.lower() == g.lower() for x in smp) / n_sample
+
+
 @torch.no_grad()
 def states(Q, text, im=None):
     """{layer: [P, D]} at the positions the generator reads (after the system prompt, image pads removed); key
@@ -157,6 +179,13 @@ def depth(out, n_fit=4000):
                 hop=[(f'Think of {d}.' + TAIL, None, x) for x, d in HOP[:N_EVAL]],
                 direct=[(f'Think of {x}.' + TAIL, None, x) for x, _ in PAIRS],
                 twostep=[(f'Think of {d}.' + TAIL, None, x) for x, d in PAIRS])
+    if 'secret' in SETS:
+        meta = []
+        for c in SECRET_CATS:
+            for l in SECRET_LETTERS:
+                t = SECRET_T.format(c=c, l=l) + TAIL; g, agree = reveal(Q, t); meta.append(dict(cat=c, letter=l, label=g, agreement=agree, letter_ok=g[:1].upper() == l))
+        sets['secret'] = [(SECRET_T.format(c=m['cat'], l=m['letter']) + TAIL, None, m['label']) for m in meta]
+        log('secret choices', [(m['cat'], m['letter'], m['label'], m['agreement']) for m in meta])
     sets = {k: v for k, v in sets.items() if k in SETS}
     assert all(l in LAYERS for l in RAW), (RAW, LAYERS)
     cols = [f'L{l}' for l in LAYERS] + [f'L{Q.last}'] + [f'raw L{l}' for l in RAW]
@@ -191,8 +220,25 @@ def depth(out, n_fit=4000):
             f.append(F.normalize((o if torch.is_tensor(o) else o.pooler_output).float(), dim=-1).cpu())
         return torch.cat(f)
     for name, items in sets.items():
-        bank = feats(ims=tims) if name == 'photos' else feats(texts=[f'a photo of {x}.' for _, _, x in items])
-        rk = {c: ranks(feats(ims=pics[name][c]), bank) for c in cols}
+        bank = feats(ims=tims) if name == 'photos' else None if name == 'secret' else feats(texts=[f'a photo of {x}.' for _, _, x in items])
+        if name == 'secret':                              # rank among the distinct labels of the item's own category
+            rk = {}
+            for c in cols:
+                f = feats(ims=pics[name][c]); r = torch.zeros(len(items), dtype=torch.long)
+                for cat in SECRET_CATS:
+                    idx = [i for i, m in enumerate(meta) if m['cat'] == cat]; labs = sorted({meta[i]['label'] for i in idx})
+                    sim = f[idx] @ feats(texts=[f'a photo of {x}.' for x in labs]).T
+                    for j, i in enumerate(idx):
+                        r[i] = int((sim[j] > sim[j, labs.index(meta[i]['label'])]).sum())
+                rk[c] = r
+            from collections import Counter
+            mode = sum(Counter(m['label'] for m in meta if m['cat'] == cat).most_common(1)[0][1] for cat in SECRET_CATS)
+            res['secret'] = dict(items=meta, n_labels={cat: len({m['label'] for m in meta if m['cat'] == cat}) for cat in SECRET_CATS},
+                                 most_common_answer_top1=round(mode / len(meta), 4), letter_ok=round(sum(m['letter_ok'] for m in meta) / len(meta), 4),
+                                 chance_top1=round(sum(1 / len({x['label'] for x in meta if x['cat'] == m['cat']}) for m in meta) / len(meta), 4))
+            log('secret baselines', {k: v for k, v in res['secret'].items() if k != 'items'})
+        else:
+            rk = {c: ranks(feats(ims=pics[name][c]), bank) for c in cols}
         res['scores'][name] = {c: summary(r) for c, r in rk.items()}
         res.setdefault('ranks', {})[name] = {c: r.tolist() for c, r in rk.items()}
         if name != 'photos':
