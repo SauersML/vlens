@@ -88,14 +88,14 @@ def region(Q, full, start_char):
 
 @torch.no_grad()
 def run(Q, full, k, hooks=(), gen=0):
-    """{layer: [k, D]} for RAW + the last layer (post-norm, as the pipeline reads it), at the last k positions; and
+    """{layer: [k, D]} for RAW + the last layer (its output before the final norm, as the pipeline reads it), at the last k positions; and
     the greedy continuation of `gen` tokens with the same hooks"""
     cap = {}; ids = Q.proc.tokenizer([full], return_tensors='pt', add_special_tokens=False).to(DEV)
     hs = list(hooks) + [Q.layers[l - 1].register_forward_hook(lambda m, i, o, l=l: cap.__setitem__(l, (o[0] if isinstance(o, tuple) else o)[0, -k:]))
-                        for l in RAW]
+                        for l in RAW + (Q.last,)]
     try:
-        out = Q.enc(**ids, output_hidden_states=True)
-        st = {l: cap[l].clone() for l in RAW}; st[Q.last] = out.hidden_states[-1][0, -k:].clone()
+        Q.enc(**ids)
+        st = {l: cap[l].clone() for l in RAW + (Q.last,)}
         for h in hs[len(hooks):]:
             h.remove()                                 # capture off before generating; the item's own hooks stay
         text = ''
