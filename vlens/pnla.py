@@ -9,7 +9,7 @@ ridge map), plus the mean state. Losses:
   rb      NLA style, no photo: the picture the generator would finish from step k of its own 8-step sampling (steps
           before k without gradient, then that step's estimate of the clean picture, decoded) is read back by
           Qwen3-VL-4B in the see chat and has to pick out its own source activation among the batch and BANK train
-          sources (InfoNCE on standardized activations); see only
+          sources (InfoNCE on standardized activations, the pictures' running mean readback removed first); see only
   anchor  mean squared distance of the states from the ridge map's
 Kinds: see (the 4B looked at the photo) or hold (the 4B read one of its captions in a HOLD_TR wording).
 Eval on qimg's 100 COCO test photos with qimg's seed and size, ridge map vs trained: SigLIP 2 rank of each picture among
@@ -27,6 +27,7 @@ TR_PX, EV_PX = int(os.environ.get('VLENS_PNLA_PX', PX)), int(os.environ.get('VLE
 STEPS, MINUTES = int(os.environ.get('VLENS_PNLA_STEPS', 4000)), float(os.environ.get('VLENS_PNLA_MIN', 60))
 BS, RB_BS, LR = int(os.environ.get('VLENS_PNLA_BS', 8)), int(os.environ.get('VLENS_PNLA_RBBS', 4)), float(os.environ.get('VLENS_PNLA_LR', 2e-4))
 KMIN, BANK, TAU = int(os.environ.get('VLENS_PNLA_KMIN', 2)), 4096, 0.07
+RERANK = int(os.environ.get('VLENS_PNLA_RERANK', 4))
 N_TEST, N_SHOW, SEED = int(os.environ.get('VLENS_QIMG_TEST', 100)), 12, 11
 STORIES = [['A family drives to a sunny beach and opens a red umbrella.', 'The kids build a sandcastle near the water.',
             'A dog runs along the shore chasing seagulls.', 'Dark clouds roll in over the sea.',
@@ -182,13 +183,27 @@ def fm_eval(G, C, Z):
 
 @torch.no_grad()
 def evaluate(R, G, A, te, ridge, sig, real, see_z, mu, sd, out):
+    """SigLIP 2 rank among the test photos; readback rank among the test sources, standardized as qimg (readback) and
+    also with the pictures' own mean readback removed (readback_centered: every generated picture shares an offset of
+    about 0.83 of its standardized readback, q5); for the trained adapter also best of RERANK draws chosen by readback"""
     tag = 'ridge' if ridge else 'trained'
     C = torch.cat([A(te['src'][i:i + 32].to(DEV), ridge).cpu() for i in range(0, len(te['src']), 32)])
+    rbk = lambda P: (torch.cat([R.see(to_t([square(p) for p in P[i:i + 32]])).cpu() for i in range(0, len(P), 32)]) - mu) / sd
     pics = [G.picture(C[i], SEED) for i in range(len(C))]
     for i, p in enumerate(pics):
         p.save(out / 'pics' / f'{tag}_{i}.jpg', quality=90 if i < N_SHOW else 80)
-    rb = torch.cat([R.see(to_t([square(p) for p in pics[i:i + 32]])).cpu() for i in range(0, len(pics), 32)])
-    res = dict(siglip=summary(ranks(sig(pics), real)), readback=summary(ranks((rb - mu) / sd, see_z)), fm=fm_eval(G, C, te['z']))
+    q = rbk(pics); f0 = sig(pics)
+    res = dict(siglip=summary(ranks(f0, real)), readback=summary(ranks(q, see_z)), readback_centered=summary(ranks(q - q.mean(0), see_z)),
+               fm=fm_eval(G, C, te['z']))
+    if not ridge and RERANK > 1:
+        Q, Fs = [q], [f0]
+        for k in range(1, RERANK):
+            P = [G.picture(C[i], SEED + 101 * k) for i in range(len(C))]; Q.append(rbk(P)); Fs.append(sig(P))
+        Q, Fs = torch.stack(Q), torch.stack(Fs); rows = torch.arange(len(C))
+        by_rb = (F.normalize(Q, dim=-1) * F.normalize(see_z, dim=-1)[None]).sum(-1).argmax(0)
+        by_photo = (Fs * real[None]).sum(-1).argmax(0)
+        res['rerank'] = dict(k=RERANK, chosen_by_readback=summary(ranks(Fs[by_rb, rows], real)), chosen_by_the_photo=summary(ranks(Fs[by_photo, rows], real)),
+                             average_draw_top1=round(sum(summary(ranks(Fs[k], real))['top1'] for k in range(RERANK)) / RERANK, 4))
     log(tag, res)
     return res, pics
 
@@ -252,7 +267,7 @@ def pnla(out, maps, n_train=12000):
     opt = torch.optim.AdamW(params, lr=LR, weight_decay=0.0, betas=(0.9, 0.99))
     SRC, IDX, Z = tr['src'].to(DEV), tr['idx'].to(DEV), tr['z'].to(DEV)
     zb = F.normalize((tr['see'].float() - mu) / sd, dim=-1).to(DEV)            # rb's positives and bank (see sources)
-    sigs = torch.tensor(G.sig[:-1], device=DEV); hist, acc = [], {}; t0 = time.monotonic(); step = 0
+    sigs = torch.tensor(G.sig[:-1], device=DEV); hist, acc = [], {}; t0 = time.monotonic(); step = 0; off = None   # off: running mean readback of the pictures
     for step in range(1, STEPS + 1):
         if (time.monotonic() - t0) / 60 > MINUTES:
             break
@@ -272,7 +287,9 @@ def pnla(out, maps, n_train=12000):
             img = G.decode(x.float() - G.sig[k] * G.v(x, G.sig[k], Cb).float())
             if TR_PX != PX:
                 img = F.interpolate(img, size=(PX, PX), mode='bilinear', antialias=True)
-            q = F.normalize((R.see(img) - mu_d) / sd_d, dim=-1)
+            q = (R.see(img) - mu_d) / sd_d
+            off = q.detach().mean(0) if off is None else 0.98 * off + 0.02 * q.detach().mean(0)
+            q = F.normalize(q - off, dim=-1)
             logits = q @ torch.cat([zb[IDX[b[:n]]], zb[torch.randint(len(zb), (BANK,), device=DEV)]]).T / TAU
             parts['rb'] = F.cross_entropy(logits, torch.arange(n, device=DEV)); loss = loss + W_RB * parts['rb']
             parts['rb_top1'] = (logits.argmax(1) == torch.arange(n, device=DEV)).float().mean()
