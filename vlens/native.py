@@ -1,27 +1,37 @@
 """Pictures of a real LLM's own internal states, with no training: Qwen3-VL-8B-Instruct -> Qwen-Image-2.1-Turbo.
 
-Qwen-Image-2.1's picture generator was trained to read the last-layer states (before the final norm) of Qwen3-VL-8B,
-and its encoder is the public Qwen3-VL-8B-Instruct checkpoint (checked tensor by tensor). Here Qwen3-VL-8B reads a
-blank prompt while its states are changed from the inside, and the generator renders whatever its states now hold:
-  concept   + a x (mean state of photos whose captions name the concept - mean over all photos), layer STEER_L,
-            at every position of the user turn
-  neuron    + k sd on the one MLP neuron at STEER_L that best separates those photos from all photos
-  random    + 40 sd on random MLP neurons at the same layer (control)
-  transplant  the states of the last 5 positions after layer L while Qwen3-VL-8B looks at a real photo ("Look at this
-            photo and keep it in mind. Don't describe it. Just reply OK."), copied into the blank prompt at layer L
-Every picture in a row uses the same noise. In the same steered model Qwen3-VL-8B is also asked what it is thinking
-about, so its words sit beside the pictures.
+Qwen-Image-2.1's picture generator reads the last-layer states (before the final norm) of Qwen3-VL-8B, and its encoder
+is the public Qwen3-VL-8B-Instruct checkpoint (checked tensor by tensor). When the pipeline edits a photo, the photo's
+own positions in that sequence are replaced by the photo's VAE latents, so Qwen3-VL's states at the image tokens never
+reach the generator; only its states at the text positions do. Those include the positions after the photo, which have
+attended to it: the reply start.
+
+Two tests:
+  photo rows   Qwen3-VL-8B looks at a photo inside the pipeline's own edit template. The generator gets only Qwen's
+               last-layer states at the text positions (no pixels, no latents, no image tokens):
+                 with pixels    the normal edit path with the photo's latents, for reference
+                 states, blank  the user text is " "
+                 states, see    the user text is the vlens see prompt ("Look at this photo ... Just reply OK.")
+                 reply start    only the last 5 positions of "states, see"
+  concept rows Qwen3-VL-8B reads a blank prompt while its states are pushed along a direction, at layer STEER_L, at
+               every position after the system prompt. Strength s is in units of the typical state size there:
+                 concept  the mean reply-start state of photos whose captions name the concept minus that of all photos
+                 neuron   the one MLP neuron at STEER_L that best separates those photos from all photos, raised until
+                          its write has the same size
+               In the same steered model Qwen3-VL-8B is asked what it is thinking about, so its words sit beside them.
+Every picture uses the same noise.
 Usage: python -m vlens native OUT [N_PHOTOS]"""
 import re
 from .common import *
 
 GEN = 'Qwen/Qwen-Image-2.1-Turbo'
-STEER_L, TRANS_L = 18, (8, 18)
+STEER_L = 18
 CONCEPTS = ['dog', 'cat', 'horse', 'elephant', 'giraffe', 'pizza', 'banana', 'train', 'airplane', 'boat', 'snow',
             'beach', 'kitchen', 'bus', 'clock', 'umbrella']
-A_CONCEPT, A_NEURON = (1.0, 2.0, 4.0), (10.0, 20.0, 40.0)
+S_CONCEPT, S_NEURON = (0.5, 1.0, 2.0, 4.0), (1.0, 2.0, 4.0)
 ASK_T = "What are you thinking about right now? Answer in at most eight words."
 RES = int(os.environ.get('VLENS_NATIVE_RES', 768))
+N_TEST = int(os.environ.get('VLENS_NATIVE_TEST', 16))
 
 
 class Native:
@@ -33,18 +43,12 @@ class Native:
         self.layers = self.enc.model.language_model.layers
         self.drop = self.pipe._drop_idx
 
-    def hook_state(self, layer, fn):
-        """fn(t) -> t on the output of decoder layer `layer` (1-indexed)"""
+    def hook_add(self, layer, v, start):
+        """+ v to the output of decoder layer `layer` (1-indexed) at positions >= start"""
         def f(mod, a, o):
-            t = fn((o[0] if isinstance(o, tuple) else o).clone())
+            t = (o[0] if isinstance(o, tuple) else o).clone(); t[:, start:] += v.to(t.device, t.dtype)
             return (t,) + tuple(o[1:]) if isinstance(o, tuple) else t
         return self.layers[layer - 1].register_forward_hook(f)
-
-    def hook_add(self, layer, v, start):
-        """+ v to the output of decoder layer `layer` at positions >= start"""
-        def fn(t):
-            t[:, start:] += v.to(t.device, t.dtype); return t
-        return self.hook_state(layer, fn)
 
     def hook_neuron(self, layer, n, add, start):
         """+ add to MLP neuron n of decoder layer `layer` (the input of down_proj) at positions >= start"""
@@ -54,41 +58,33 @@ class Native:
         return self.layers[layer - 1].mlp.down_proj.register_forward_pre_hook(f)
 
     @torch.no_grad()
-    def embeds(self, hooks=()):
-        """the generator's input for a blank prompt, computed by the pipeline's own code with `hooks` active"""
+    def encode(self, text=' ', im=None, hooks=(), capture=None):
+        """the pipeline's own encoding of `text` (and photo `im`) with `hooks` active: (states at the text positions
+        after the system prompt, all positions' image-pad mask, full states, captured). With `capture` = a layer, also
+        returns that layer's output and the MLP neuron activations there, at the last 5 positions."""
+        cap = {}
+        hs = list(hooks)
+        if capture:
+            hs.append(self.layers[capture - 1].register_forward_hook(
+                lambda m, a, o: cap.__setitem__('h', (o[0] if isinstance(o, tuple) else o)[0, -5:].float().cpu())))
+            hs.append(self.layers[capture - 1].mlp.down_proj.register_forward_pre_hook(
+                lambda m, a: cap.__setitem__('n', a[0][0, -5:].float().cpu())))
         try:
-            return self.pipe._get_qwen_prompt_embeds([' '], None, DEV)[:2]
-        finally:
-            for h in hooks:
-                h.remove()
-
-    @torch.no_grad()
-    def picture(self, e, seed):
-        pe, pm = e
-        return self.pipe(prompt_embeds=pe, prompt_embeds_mask=pm, height=RES, width=RES,
-                         generator=torch.Generator('cpu').manual_seed(seed)).images[0].convert('RGB')   # the generator outputs RGBA
-
-    @torch.no_grad()
-    def see(self, ims, layers):
-        """reply-start stats of the vlens see chat: last-5-position states after each layer in `layers` and the last
-        position's MLP neuron activations at STEER_L"""
-        cap, out = {}, {l: [] for l in layers}; neu = []
-        hs = [self.layers[l - 1].register_forward_hook(lambda m, a, o, l=l: cap.__setitem__(l, (o[0] if isinstance(o, tuple) else o)[:, -5:].float().cpu()))
-              for l in layers]
-        hs.append(self.layers[STEER_L - 1].mlp.down_proj.register_forward_pre_hook(lambda m, a: cap.__setitem__('n', a[0][:, -1].float().cpu())))
-        text = self.proc.apply_chat_template([{'role': 'user', 'content': [{'type': 'image'}, {'type': 'text', 'text': SEE_T}]}],
-                                             tokenize=False, add_generation_prompt=True)
-        try:
-            for i in range(0, len(ims), 8):
-                b = self.proc(text=[text] * len(ims[i:i + 8]), images=ims[i:i + 8], return_tensors='pt').to(DEV)
-                self.enc.model(**{k: v for k, v in b.items()}, use_cache=False)
-                for l in layers:
-                    out[l].append(cap[l])
-                neu.append(cap['n'])
+            e, m, pad = self.pipe._get_qwen_prompt_embeds([text], None if im is None else [im], DEV)
         finally:
             for h in hs:
                 h.remove()
-        return {l: torch.cat(v) for l, v in out.items()}, torch.cat(neu)
+        return e[0][~pad[0].bool()], pad, (e, m), cap
+
+    @torch.no_grad()
+    def picture(self, e, seed, image=None):
+        """render states e (positions x 4096, text positions only), or the normal edit of `image` when e is None"""
+        kw = dict(height=RES, width=RES, generator=torch.Generator('cpu').manual_seed(seed))
+        if e is None:
+            out = self.pipe(prompt=' ', image=[image], **kw)
+        else:
+            out = self.pipe(prompt_embeds=e[None], prompt_embeds_mask=torch.ones(1, len(e), dtype=torch.long, device=e.device), **kw)
+        return out.images[0].convert('RGB')   # the generator outputs RGBA
 
     @torch.no_grad()
     def words(self, hook_fn):
@@ -114,63 +110,66 @@ def photos(df, word, n):
 def native(out, n_photos=32):
     out = Path(out); (out / 'pics').mkdir(parents=True, exist_ok=True)
     Q = Native(); log('loaded', GEN, 'drop', Q.drop)
-    see_t = Q.proc.apply_chat_template([{'role': 'user', 'content': [{'type': 'image'}, {'type': 'text', 'text': SEE_T}]}], tokenize=False, add_generation_prompt=True)
-    tail = lambda text: Q.proc.tokenizer.convert_ids_to_tokens(Q.proc.tokenizer(text)['input_ids'][-5:])
-    assert tail(see_t) == tail(Q.pipe.prompt_template_t2i.format(' ')), (tail(see_t), tail(Q.pipe.prompt_template_t2i.format(' ')))
+    SEED, S = 11, 256
+    save = lambda p, name: p.save(out / 'pics' / f'{name}.jpg', quality=90) or p
+
+    # photo rows: the generator gets only Qwen's states, never the pixels
+    te = coco_table('test').head(int(N_TEST * 1.5))
+    with cf.ThreadPoolExecutor(32) as ex:
+        tims = [square(im) for im in ex.map(fetch, te['url'].tolist()) if im is not None][:N_TEST]
+    prow, pcols = [], ['photo', 'with pixels', 'states, blank', 'states, see', 'reply start']
+    for i, im in enumerate(tims):
+        eb, pad, _, _ = Q.encode(' ', im)
+        es, _, _, _ = Q.encode(SEE_T, im)
+        assert int(pad.sum()) > 0 and len(eb) < pad.shape[1], (pad.shape, len(eb))
+        row = [im, save(Q.picture(None, SEED, im), f'photo{i}_pixels'), save(Q.picture(eb, SEED), f'photo{i}_blank'),
+               save(Q.picture(es, SEED), f'photo{i}_see'), save(Q.picture(es[-5:], SEED), f'photo{i}_reply')]
+        prow.append(row)
+        if i == 0:
+            log('text positions, blank', len(eb), 'see', len(es), 'image pads', int(pad.sum()))
+    log('photo rows', len(prow))
+
+    # concept rows: steering at STEER_L, strength in units of the typical state size there
+    blank, _, _, bc = Q.encode(' ', capture=STEER_L)
+    hn = float(bc['h'].norm(dim=-1).median()); ref = save(Q.picture(blank, SEED), 'blank')
+    wd = Q.layers[STEER_L - 1].mlp.down_proj.weight.float().norm(dim=0).cpu()        # write size per neuron
     df = coco_table('train').sample(frac=1, random_state=0).iloc[40000:].reset_index(drop=True)
     with cf.ThreadPoolExecutor(32) as ex:
         base = [square(im) for im in ex.map(fetch, df['url'].head(300).tolist()) if im is not None][:256]
-    G0, N0 = Q.see(base, (STEER_L,)); g_mean = G0[STEER_L][:, -1].mean(0); n_mean, n_sd = N0.mean(0), N0.std(0) + 1e-3
-    log('baseline photos', len(base))
-    blank = Q.embeds(); SEED = 11
-    S = 256; rows, rec = [], []
-    ref = Q.picture(blank, SEED); ref.save(out / 'pics' / 'blank.jpg', quality=90)
+
+    def stats(ims):
+        H, N = [], []
+        for im in ims:
+            c = Q.encode(' ', im, capture=STEER_L)[3]; H.append(c['h'].mean(0)); N.append(c['n'].mean(0))
+        return torch.stack(H), torch.stack(N)
+    H0, N0 = stats(base); h_mean, n_mean, n_sd = H0.mean(0), N0.mean(0), N0.std(0) + 1e-3
+    log('baseline photos', len(base), 'state size', round(hn, 1))
+    crow, rec = [], []
     for c in CONCEPTS:
         ims = photos(df.iloc[300:], c, n_photos)
         if len(ims) < 4:
             continue
-        G, N = Q.see(ims, (STEER_L,))
-        v = (G[STEER_L][:, -1].mean(0) - g_mean).to(DEV, BF)
-        z = (N.mean(0) - n_mean) / n_sd; nb = int(z.argmax())
-        pics, labels = [ref], ['blank prompt']
-        for a in A_CONCEPT:
-            pics.append(Q.picture(Q.embeds([Q.hook_add(STEER_L, a * v, Q.drop)]), SEED)); labels.append(f'concept x{a:g}')
-        for a in A_NEURON:
-            pics.append(Q.picture(Q.embeds([Q.hook_neuron(STEER_L, nb, a * float(n_sd[nb]), Q.drop)]), SEED)); labels.append(f'neuron {nb} +{a:g} sd')
-        said = dict(concept=Q.words(lambda: [Q.hook_add(STEER_L, A_CONCEPT[-1] * v, 0)]),
-                    neuron=Q.words(lambda: [Q.hook_neuron(STEER_L, nb, A_NEURON[-1] * float(n_sd[nb]), 0)]))
-        for k, p in enumerate(pics):
-            p.save(out / 'pics' / f'{c}_{k}.jpg', quality=90)
-        rows.append((ims[:2], pics)); rec.append(dict(concept=c, photos=len(ims), neuron=[STEER_L, nb, round(float(z[nb]), 2)], labels=labels, said=said))
-        log(c, 'photos', len(ims), 'neuron', nb, 'z', round(float(z[nb]), 2), said)
-    g = torch.Generator().manual_seed(3); ctrl = []
-    for n in torch.randint(len(n_sd), (6,), generator=g).tolist():
-        p = Q.picture(Q.embeds([Q.hook_neuron(STEER_L, n, A_NEURON[-1] * float(n_sd[n]), Q.drop)]), SEED); p.save(out / 'pics' / f'random_{n}.jpg', quality=90)
-        ctrl.append((n, p))
-    te = coco_table('test').head(40)
-    with cf.ThreadPoolExecutor(32) as ex:
-        tims = [square(im) for im in ex.map(fetch, te['url'].tolist()) if im is not None][:8]
-    T, _ = Q.see(tims, TRANS_L); trans = []
-    for i, im in enumerate(tims):
-        row = [im]
-        for l in TRANS_L:
-            def put(t, H=T[l][i]):
-                t[:, -5:] = H.to(t.device, t.dtype); return t
-            p = Q.picture(Q.embeds([Q.hook_state(l, put)]), SEED); p.save(out / 'pics' / f'transplant_L{l}_{i}.jpg', quality=90); row.append(p)
-        trans.append(row)
-    ncol = 2 + len(rows[0][1]) if rows else 3
-    Gd = Image.new('RGB', (ncol * S, (len(rows) + 1 + len(trans)) * S), 'white')
-    for r, (ims, pics) in enumerate(rows):
-        for k, im in enumerate(ims + pics):
-            Gd.paste(im.resize((S, S)), (k * S, r * S))
-    for k, (_, p) in enumerate(ctrl):
-        Gd.paste(p.resize((S, S)), ((2 + k) * S, len(rows) * S))
-    for r, row in enumerate(trans):
+        H, N = stats(ims)
+        d = H.mean(0) - h_mean; u = (d / d.norm()).to(DEV, BF)
+        z = (N.mean(0) - n_mean) / n_sd; nb = int(z.argmax()); per = hn / float(wd[nb])
+        pics = [ref]
+        for s in S_CONCEPT:
+            e = Q.encode(' ', hooks=[Q.hook_add(STEER_L, s * hn * u, Q.drop)])[0]; pics.append(save(Q.picture(e, SEED), f'{c}_concept{s:g}'))
+        for s in S_NEURON:
+            e = Q.encode(' ', hooks=[Q.hook_neuron(STEER_L, nb, s * per, Q.drop)])[0]; pics.append(save(Q.picture(e, SEED), f'{c}_neuron{s:g}'))
+        said = {f'concept {s:g}': Q.words(lambda s=s: [Q.hook_add(STEER_L, s * hn * u, 1)]) for s in (1.0, 2.0)}
+        said['neuron 2'] = Q.words(lambda: [Q.hook_neuron(STEER_L, nb, 2 * per, 1)])
+        crow.append((ims[:2], pics))
+        rec.append(dict(concept=c, photos=len(ims), mean_gap_over_state_size=round(float(d.norm()) / hn, 3),
+                        neuron=[STEER_L, nb, round(float(z[nb]), 2)], said=said))
+        log(c, 'photos', len(ims), 'gap/size', rec[-1]['mean_gap_over_state_size'], 'neuron', nb, 'z', round(float(z[nb]), 2), said)
+    ccols = ['photo', 'photo', 'blank prompt'] + [f'concept s{s:g}' for s in S_CONCEPT] + [f'neuron s{s:g}' for s in S_NEURON]
+
+    W = max(len(pcols), len(ccols)); Gd = Image.new('RGB', (W * S, (len(prow) + len(crow)) * S), 'white')
+    for r, row in enumerate(prow + [ims + pics for ims, pics in crow]):
         for k, im in enumerate(row):
-            Gd.paste(im.resize((S, S)), (k * S, (len(rows) + 1 + r) * S))
+            Gd.paste(im.resize((S, S)), (k * S, r * S))
     Gd.save(out / 'native_grid.jpg', quality=88)
-    json.dump(dict(generator=GEN, steer_layer=STEER_L, transplant_layers=TRANS_L, seed=SEED, res=RES, concepts=rec,
-                   random_neurons=[n for n, _ in ctrl],
-                   columns=['photo', 'photo', 'blank prompt'] + [f'concept x{a:g}' for a in A_CONCEPT] + [f'neuron +{a:g} sd' for a in A_NEURON],
-                   transplant_columns=['photo'] + [f'transplant after layer {l}' for l in TRANS_L]), open(out / 'native.json', 'w'), indent=1)
+    json.dump(dict(generator=GEN, steer_layer=STEER_L, seed=SEED, res=RES, state_size=hn, photo_columns=pcols,
+                   concept_columns=ccols, concepts=rec), open(out / 'native.json', 'w'), indent=1)
     log('saved', out / 'native_grid.jpg')
