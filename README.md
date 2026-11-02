@@ -152,6 +152,7 @@ the same 100 test photos, seed and size as above.
 |---|---|---|---|---|
 | sees the photo, ridge map (start) | 33% | 72% | 11% | |
 | sees the photo, Turbo's flow-matching loss on the photo | 55% | 89% | 30% | 58% |
+| the same, 60 more minutes | 56% | 89% | 34% | 61% |
 | reads a caption, ridge map (start) | 22% | 50% | 11% | |
 | reads a caption, Turbo's flow-matching loss on the photo | 15% | 44% | 10% | 17% |
 
