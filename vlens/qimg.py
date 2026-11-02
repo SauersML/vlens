@@ -117,7 +117,40 @@ def ridge(X, Y):
     del f
     best = max(fve, key=fve.get); W = fit(n)(best)
     del Xs, Yc; torch.cuda.empty_cache()
-    return (lambda A: (((A.float() - mu) / sd).to(DEV) @ W).view(len(A), *Y.shape[1:]).cpu() + ym), best, fve
+    f = lambda A: (((A.float() - mu) / sd).to(DEV) @ W).view(len(A), *Y.shape[1:]).cpu() + ym
+    f.parts = (W, mu, sd, ym)
+    return f, best, fve
+
+
+def low_rank(f, r=512):
+    """the map at rank r, small enough to keep (U [d,r] and V [m,r] in fp16 plus the standardization)"""
+    W, mu, sd, ym = f.parts; U, S, V = torch.svd_lowrank(W, q=r + 16, niter=4)
+    return dict(U=(U[:, :r] * S[:r]).half().cpu(), V=V[:, :r].half().cpu(), mu=mu, sd=sd, ym=ym)
+
+
+@torch.no_grad()
+def rerank(R, Q, pre, P, first, see_z, mu, sd, sig, real, out):
+    """best of K by readback, the NLA-style choice with no training: K pictures per test photo from the see map's
+    states with different noise; keep the one Qwen3-VL-4B reads back closest to the source activation. Scored by SigLIP
+    2 against the photos, beside one draw, the average draw, and the draw picked by the photo itself (not available
+    to a reader; the most any choice among these K could add)."""
+    K = int(os.environ.get('VLENS_QIMG_K', 4)); n = len(P)
+    cand = [first] + [[Q.picture(torch.cat([pre, P[i].to(DEV, BF)]), SEED + 101 * k) for i in range(n)] for k in range(1, K)]
+    src = F.normalize(see_z, dim=-1); sims, feats = [], []
+    for c in cand:
+        rb = torch.cat([R.see(to_t([square(p) for p in c[i:i + 32]])).cpu() for i in range(0, n, 32)])
+        sims.append((F.normalize((rb - mu) / sd, dim=-1) * src).sum(-1)); feats.append(sig(c))
+    sims, feats = torch.stack(sims), torch.stack(feats)                       # [K, n], [K, n, d]
+    rows = torch.arange(n); by_rb = sims.argmax(0); by_photo = (feats * real[None]).sum(-1).argmax(0)
+    for i in range(min(n, N_SHOW)):
+        cand[int(by_rb[i])][i].save(out / 'pics' / f'see_rerank_{i}.jpg', quality=90)
+    res = dict(k=K, one_draw=summary(ranks(feats[0], real)),
+               average_draw_top1=round(sum(summary(ranks(feats[k], real))['top1'] for k in range(K)) / K, 4),
+               chosen_by_readback=summary(ranks(feats[by_rb, rows], real)),
+               chosen_by_the_photo=summary(ranks(feats[by_photo, rows], real)),
+               readback_choice_agrees_with_photo_choice=round(float((by_rb == by_photo).float().mean()), 4))
+    log('rerank', res)
+    return res
 
 
 def qimg(out, n_train=6000):
@@ -128,6 +161,7 @@ def qimg(out, n_train=6000):
     log('train photos', len(tr['ims']), 'test photos', len(te['ims']), 'target positions', tuple(tr['tgt'].shape[1:]), 'before the photo', len(tr['pre']))
     pre = tr['pre'].to(DEV, BF); res = dict(target_text=TGT_T, n_train=len(tr['ims']), n_test=len(te['ims']), maps={})
     preds = dict(ceiling=te['tgt'].float(), mean=tr['tgt'].float().mean(0).expand(len(te['ims']), -1, -1))
+    keep = {}
     for kind in ('see', 'inj', 'hold'):
         f, lam, fve = ridge(tr[kind], tr['tgt'])
         preds[kind] = f(te[kind]); tf = 1 - float(((preds[kind] - te['tgt'].float()) ** 2).sum()) / float(((te['tgt'].float() - tr['tgt'].float().mean(0)) ** 2).sum())
@@ -135,6 +169,8 @@ def qimg(out, n_train=6000):
         log(kind, res['maps'][kind])
         if kind == 'hold':
             fh = f
+        if kind in ('see', 'hold'):
+            keep[kind] = low_rank(f)
         del f
     d = tr['see'].shape[1] // len(READ)                                # one layer at a time: which depth carries it
     for kind in ('see', 'hold'):
@@ -175,6 +211,8 @@ def qimg(out, n_train=6000):
         o = sm.get_text_features(**sp(text=texts, padding='max_length', max_length=64, return_tensors='pt').to(DEV))
         return F.normalize((o if torch.is_tensor(o) else o.pooler_output).float(), dim=-1).cpu()
     res['explore'] = explore(R, Q, fh, pre, out, sig, sigt)
+    res['rerank'] = rerank(R, Q, pre, preds['see'], pics['see'], see_z, mu, sd, sig, real, out)
+    save(dict(maps=keep, pre=tr['pre'], target_text=TGT_T, see_mu=mu, see_sd=sd), out / 'qimg_maps.pt')
     save(dict(readback=RB, see=te['see'], inj=te['inj'], hold=te['hold'], mu=mu, sd=sd, siglip_real=real), out / 'qimg_rows.pt')
     cols = ['photo'] + list(pics); S = 256
     Gd = Image.new('RGB', (len(cols) * S, N_SHOW * S), 'white')
