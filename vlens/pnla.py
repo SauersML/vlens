@@ -33,6 +33,7 @@ BS, RB_BS, LR = int(os.environ.get('VLENS_PNLA_BS', 8)), int(os.environ.get('VLE
 KMIN, BANK, TAU = int(os.environ.get('VLENS_PNLA_KMIN', 2)), 4096, 0.07
 RERANK = int(os.environ.get('VLENS_PNLA_RERANK', 4))
 RFT_K, RFT_BS = int(os.environ.get('VLENS_PNLA_RFT', 0)), int(os.environ.get('VLENS_PNLA_RFTBS', 4))
+PEEK_MIN = float(os.environ.get('VLENS_PNLA_PEEK', 15))     # minutes between quick evals during training (32 test photos)
 N_TEST, N_SHOW, SEED = int(os.environ.get('VLENS_QIMG_TEST', 100)), 12, 11
 STORIES = [['A family drives to a sunny beach and opens a red umbrella.', 'The kids build a sandcastle near the water.',
             'A dog runs along the shore chasing seagulls.', 'Dark clouds roll in over the sea.',
@@ -273,9 +274,20 @@ def pnla(out, maps, n_train=12000):
     SRC, IDX, Z = tr['src'].to(DEV), tr['idx'].to(DEV), tr['z'].to(DEV)
     zb = F.normalize((tr['see'].float() - mu) / sd, dim=-1).to(DEV)            # rb's positives and bank (see sources)
     sigs = torch.tensor(G.sig[:-1], device=DEV); hist, acc = [], {}; t0 = time.monotonic(); step = 0; off = None   # off: running mean readback of the pictures
+    next_peek = PEEK_MIN; res['peeks'] = []          # quick evals: the first 32 test photos drawn at the training size, ranked among all 100
+
+    @torch.no_grad()
+    def peek():
+        n = min(32, len(te['src'])); C = A(te['src'][:n].to(DEV)); P = [G.picture(C[i], SEED, TR_PX) for i in range(n)]
+        full = ranks(sig(P), real); row = dict(step=step, minutes=round((time.monotonic() - t0) / 60, 1), top1_among_100=round(float((full < 1).float().mean()), 4),
+                                                top5_among_100=round(float((full < 5).float().mean()), 4), n=n)
+        res['peeks'].append(row); log('peek', row)
+    step = 0; peek()
     for step in range(1, STEPS + 1):
         if (time.monotonic() - t0) / 60 > MINUTES:
             break
+        if (time.monotonic() - t0) / 60 > next_peek:
+            next_peek += PEEK_MIN; peek()
         for g in opt.param_groups:
             g['lr'] = LR * min(1.0, step / 50)
         b = torch.randint(len(SRC), (BS,), device=DEV); C = A(SRC[b]); loss = 0.0; parts = {}
