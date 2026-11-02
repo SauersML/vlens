@@ -124,6 +124,31 @@ First run (6,000 COCO training photos, 100 held-out test photos, 512 px; SigLIP 
 Every klein connector before this (flow matching on the distilled or the base model, end-to-end DINOv2 through the
 4 steps, a direct linear path) learned one conditioning for every activation.
 
+## A picture lens across depth (`vlens depth`)
+
+A tuned lens with a picture as the readout. For each layer L of Qwen3-VL-8B, a ridge map carries the layer-L state at
+a position to the last-layer state at the same position (fit on 137,601 token pairs from 4,000 contexts, photos and
+captions; held-out fit 0.89 at layer 4 to 0.96 at layer 32). The untouched Qwen-Image-2.1-Turbo then draws the mapped
+states. Prompts are "Think of X. Don't name it or describe it. Just reply OK.", and only the positions after "X." are
+drawn, so the generator never reads the words. A picture is scored by the SigLIP 2 rank of its label among the set's
+16 labels (chance 6%).
+
+| top-1 among 16, by layer | 4 | 8 | 12 | 16 | 20 | 24 | 28 | 32 | 36 (last) |
+|---|---|---|---|---|---|---|---|---|---|
+![two-step descriptions across depth](docs/depth_two_step.png)
+
+| X named ("Think of a tiger.") | 6% | 19% | 44% | 19% | 19% | 25% | 75% | 69% | 50% |
+| X described in two steps ("the most famous painting by Leonardo da Vinci") | 13% | 6% | 13% | 6% | 13% | 19% | 25% | 38% | 25% |
+| photos seen with the see prompt (rank among the 16 photos) | 13% | 38% | 63% | 31% | 44% | 50% | 63% | 56% | 56% |
+
+Named objects are drawable from layer 12 for some items (a tiger from layer 12 on) and for most at layers 28-32,
+more than at the last layer, where the empty-state picture (a robed statue) often returns. Two-step descriptions
+resolve later: the Mona Lisa and the Statue of Liberty appear first at layer 28; Jimi Hendrix's instrument is a man
+with a saxophone at layers 20-24 and an electric guitar at 28-32; the Nemo description draws a peacock through layer
+24, a blue fish at 28 and a clownfish at 32. Layer 28's raw states drawn
+with no map are a control: 13% on photos, but 56% on named objects. A run with 48 answers, each named and described,
+at every second layer is in progress.
+
 ## Run
 
 ```
