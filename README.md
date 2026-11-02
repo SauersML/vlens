@@ -208,8 +208,9 @@ A choice the prompt leaves open is not drawn. In "Let's play a guessing game. Se
 starts with the letter K." with the same ending, for 6 categories and 14 letters, the 8B is afterwards asked in the same
 chat (it replied OK) what it chose (Kangaroo; all 84 answers start with the right letter, and the 14 of each category
 differ). Ranked among the 14 answers of the category (chance 7%), no layer, mapped or not, draws the answer it later
-gives above chance (best 11%), also for the 36 choices that 7 or 8 of 8 sampled answers repeat. The pictures show
-the category: the same cartoon animal for every animal letter, the same palace for every landmark. An answer
+gives above chance (best 11%), also for the 36 choices that 7 or 8 of 8 sampled answers repeat. At most the category
+shows: the same cartoon animal for every animal letter and the same palace for every landmark; the other categories
+get the same few generic pictures whatever the letter. An answer
 determined by a description is drawn from layer 28 on; a choice under a spelling constraint is not drawable at these
 positions before the model is asked for it.
 
