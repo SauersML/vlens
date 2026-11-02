@@ -123,7 +123,7 @@ that an image generator reads its states at a later layer after the thing it ima
 
 Told in the second person ("reads your internal states ... whatever you hold vividly in mind"), nearly every thought
 is drawn as the toy figure or the black-and-white man, the pictures of "yourself" and "what you look like": 5% top-1
-at layer 32, and 5% with the plain "Think of X." after the same setup. Told in the third person ("reads the internal
+at layer 32, and 2% with the plain "Think of X." after the same setup. Told in the third person ("reads the internal
 states of this language model ... whatever the model holds"), 56%, like the plain prompt (59%) and the vivid request
 alone (48%) (layer 32, offsets removed, mean of seeds 11 and 12). Words about the model itself before the thought
 take over what the positions after it hold; asking for a vivid image adds nothing.
