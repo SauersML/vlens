@@ -5,7 +5,11 @@ It starts at qimg's ridge map (kept at rank 1024 in qimg_maps.pt), which stays f
 trained: an MLP of the standardized activation whose output layer starts at zero (so training starts exactly at the
 ridge map), plus the mean state. Losses:
   fm      the generator's own flow-matching loss on the photo's latents, with the predicted states as its condition,
-          at the Turbo sampler's 8 noise levels (oracle style: the photo is the target)
+          at the Turbo sampler's 8 noise levels (oracle style: the photo is the target). Turbo is distilled, so the
+          loss-minimizing condition draws an average of the plausible pictures (soft, blended; p1 sharper than the
+          ridge map on layout and colour, p2 from captions washed out). With FMGEN the loss comes from the undistilled
+          base model instead, at its own training noise levels (logit-normal, shifted as its scheduler shifts them);
+          Turbo, which shares the condition, still draws
   rb      NLA style, no photo: the picture the generator would finish from step k of its own 8-step sampling (steps
           before k without gradient, then that step's estimate of the clean picture, decoded) is read back by
           Qwen3-VL-4B in the see chat and has to pick out its own source activation among the batch and BANK train
@@ -33,6 +37,7 @@ BS, RB_BS, LR = int(os.environ.get('VLENS_PNLA_BS', 8)), int(os.environ.get('VLE
 KMIN, BANK, TAU = int(os.environ.get('VLENS_PNLA_KMIN', 2)), 4096, 0.07
 RERANK = int(os.environ.get('VLENS_PNLA_RERANK', 4))
 RFT_K, RFT_BS = int(os.environ.get('VLENS_PNLA_RFT', 0)), int(os.environ.get('VLENS_PNLA_RFTBS', 4))
+FMGEN = os.environ.get('VLENS_PNLA_FMGEN', '')     # e.g. Qwen/Qwen-Image-2.1: the undistilled base gives the flow-matching loss; Turbo still draws
 PEEK_MIN = float(os.environ.get('VLENS_PNLA_PEEK', 15))     # minutes between quick evals during training (32 test photos)
 N_TEST, N_SHOW, SEED = int(os.environ.get('VLENS_QIMG_TEST', 100)), 12, 11
 STORIES = [['A family drives to a sunny beach and opens a red umbrella.', 'The kids build a sandcastle near the water.',
@@ -61,6 +66,15 @@ class Gen:
         self.tr.enable_gradient_checkpointing()
         self.sig = [float(s) for s in self.pipe.config.sample_sigmas] + [0.0]
         c = self.vae.config; self.ch = self.tr.config.in_channels
+        self.fm_tr = None
+        if FMGEN and not TINY:
+            from diffusers import QwenImage21Transformer2DModel
+            self.fm_tr = QwenImage21Transformer2DModel.from_pretrained(FMGEN, subfolder='transformer', dtype=BF).to(DEV).eval().requires_grad_(False)
+        elif FMGEN:
+            from diffusers import QwenImage21Transformer2DModel
+            self.fm_tr = QwenImage21Transformer2DModel(num_layers=2, num_attention_heads=1).to(DEV, BF).eval().requires_grad_(False)
+        if self.fm_tr is not None:
+            self.fm_tr.enable_gradient_checkpointing()
         self.zm = torch.tensor(c.latents_mean, device=DEV).view(1, -1, 1, 1, 1).to(BF)
         self.zs = torch.tensor(c.latents_std, device=DEV).view(1, -1, 1, 1, 1).to(BF)
 
@@ -70,11 +84,21 @@ class Gen:
         s = s.float() if torch.is_tensor(s) else torch.full((B,), s, device=DEV)
         return (s * 1000).to(BF) / 1000
 
-    def v(self, x, s, C):
-        """velocity at packed latents x [B,N,ch], noise level s (float or [B]), states C [B,P,4096]"""
-        B, N = x.shape[:2]; h = math.isqrt(N)
+    def fm_sigmas(self, B, N):
+        """noise levels for the flow-matching loss: Turbo's 8 sampler levels, or with the base model its training
+        distribution (logit-normal, exponential shift with mu for N tokens, as the base scheduler shifts)"""
+        if self.fm_tr is None:
+            return torch.tensor(self.sig[:-1], device=DEV)[torch.randint(len(self.sig) - 1, (B,), device=DEV)]
+        u = torch.sigmoid(torch.randn(B, device=DEV)).clamp(1e-3, 1 - 1e-3)
+        mu = 0.5 + (0.9 - 0.5) / (8192 - 256) * (N - 256)
+        return math.exp(mu) / (math.exp(mu) + (1 / u - 1))
+
+    def v(self, x, s, C, fm=False):
+        """velocity at packed latents x [B,N,ch], noise level s (float or [B]), states C [B,P,4096]; fm=True uses the
+        flow-matching model (the base when FMGEN is set)"""
+        B, N = x.shape[:2]; h = math.isqrt(N); tr = self.fm_tr if fm and self.fm_tr is not None else self.tr
         m = torch.cat([torch.zeros(B, C.shape[1], dtype=torch.bool, device=DEV), torch.ones(B, N // 4, dtype=torch.bool, device=DEV)], 1)
-        return self.tr(hidden_states=x, timestep=self.t(s, B), encoder_hidden_states=C, img_shapes=[[(1, h, h)]] * B, img_mask=m,
+        return tr(hidden_states=x, timestep=self.t(s, B), encoder_hidden_states=C, img_shapes=[[(1, h, h)]] * B, img_mask=m,
                        encoder_hidden_states_mask=torch.ones(B, C.shape[1], dtype=torch.long, device=DEV), return_dict=False)[0][:, -N:]
 
     def noise(self, seeds, px):
@@ -182,7 +206,7 @@ def fm_eval(G, C, Z):
     for i in range(0, len(Z), 8):
         z0 = Z[i:i + 8].to(DEV).float(); eps = torch.randn(z0.shape, generator=g).to(DEV)
         s = torch.tensor([G.sig[(i + j) % n] for j in range(len(z0))], device=DEV)
-        v = G.v(((1 - s)[:, None, None] * z0 + s[:, None, None] * eps).to(BF), s, C[i:i + 8].to(DEV, BF))
+        v = G.v(((1 - s)[:, None, None] * z0 + s[:, None, None] * eps).to(BF), s, C[i:i + 8].to(DEV, BF), fm=True)
         tot.append(((v.float() - (eps - z0)) ** 2).mean((1, 2)).cpu())
     return round(float(torch.cat(tot).mean()), 5)
 
@@ -266,7 +290,7 @@ def pnla(out, maps, n_train=12000):
     tr = collect(R, G, coco_table('train').sample(frac=1, random_state=0).head(int(n_train)), False)
     log('train photos', len(tr['caps']), 'sources', len(tr['src']), 'latents', tuple(tr['z'].shape), 'test photos', len(te['caps']))
     sig, sigt = siglip(); real = sig(te['ims']); see_z = (te['see'].float() - mu) / sd
-    res = dict(kind=KIND, weights=dict(fm=W_FM, rb=W_RB, anchor=W_ANC, rft_k=RFT_K, rft_batch=RFT_BS), train_px=TR_PX, eval_px=EV_PX, n_train=len(tr['caps']), n_sources=len(tr['src']),
+    res = dict(kind=KIND, fm_model=FMGEN or GEN, weights=dict(fm=W_FM, rb=W_RB, anchor=W_ANC, rft_k=RFT_K, rft_batch=RFT_BS), train_px=TR_PX, eval_px=EV_PX, n_train=len(tr['caps']), n_sources=len(tr['src']),
                lr=LR, batch=BS, rb_batch=RB_BS, kmin=KMIN, tau=TAU, bank=BANK)
     res['ridge'], pr = evaluate(R, G, A, te, True, sig, real, see_z, mu, sd, out)
     params = [p for p in A.parameters() if p.requires_grad]
@@ -294,8 +318,8 @@ def pnla(out, maps, n_train=12000):
         if W_ANC:
             parts['anchor'] = ((C - A(SRC[b], True)) ** 2).mean(); loss = loss + W_ANC * parts['anchor']
         if W_FM:
-            z0 = Z[IDX[b]].float(); eps = torch.randn_like(z0); s = sigs[torch.randint(len(sigs), (BS,), device=DEV)]
-            v = G.v(((1 - s)[:, None, None] * z0 + s[:, None, None] * eps).to(BF), s, C.to(BF))
+            z0 = Z[IDX[b]].float(); eps = torch.randn_like(z0); s = G.fm_sigmas(BS, z0.shape[1])
+            v = G.v(((1 - s)[:, None, None] * z0 + s[:, None, None] * eps).to(BF), s, C.to(BF), fm=True)
             parts['fm'] = ((v.float() - (eps - z0)) ** 2).mean(); loss = loss + W_FM * parts['fm']
         if W_RB:
             n = RB_BS; Cb = C[:n].to(BF); k = random.randrange(min(KMIN, len(sigs) - 1), len(sigs))
