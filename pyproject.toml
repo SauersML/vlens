@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "vlens"
 version = "0.1.0"
-description = "Turn one hidden activation of Qwen3-VL into a picture with FLUX.2 [klein], with no text in the image path, and read it back with the same model"
+description = "Pictures of a language model's hidden states, drawn by Qwen-Image-2.1 with no text in between: a picture lens across Qwen3-VL-8B's layers and a trained adapter from Qwen3-VL-4B"
 readme = "README.md"
 license = { text = "MIT" }
 authors = [{ name = "SauersML" }]

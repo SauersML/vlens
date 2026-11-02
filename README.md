@@ -1,106 +1,133 @@
 # vlens
 
-vlens turns one hidden activation of a language model into a picture, with no text anywhere in the image path. The same
-model then looks at the picture, and its new activation is compared directly with the original one.
+vlens draws pictures of what a language model holds in its hidden states, with no text anywhere between the states
+and the picture. The generator is Qwen-Image-2.1-Turbo, which normally draws from the last-layer states of
+Qwen3-VL-8B reading a prompt. vlens gives it other states instead: Qwen3-VL-8B's own earlier layers (a picture lens
+across depth, no training), or one activation of a smaller model, Qwen3-VL-4B, through a trained adapter.
 
-The source and reader is Qwen3-VL-4B-Instruct, a vision-language model. The image generator is FLUX.2 [klein] 4B, a
-4-step distilled rectified-flow model that normally reads the hidden states of a Qwen3 text encoder. In vlens klein
-gets no prompt and no word embeddings. A small trained adapter computes klein's entire conditioning from the activation.
+## Results
 
-## Pipeline
-
-1. **Activation.** Qwen3-VL's residual stream after decoder layers 9, 18 and 27 (pre-norm), taken at the last
-   position of the reply start and concatenated: 3 x 2560 = 7,680 numbers.
-2. **Adapter.** It maps that vector to 64 conditioning tokens of size 7,680, written on top of klein's blank
-   conditioning (the encoding of an empty prompt, one constant), as the sum of three parts:
-   - a free bias, which carries whatever all pictures share;
-   - a direct path that is linear in the standardized activation with no biases (activation -> 1,024 -> 64 tokens of
-     256 -> 7,680 per token, last layer zero-initialized). It averages exactly zero over training items, so it can only
-     carry what differs between them and every gradient it gets is item-specific;
-   - a MetaQuery-style path for nonlinear structure: the activation becomes 8 tokens, 64 learned queries attend to them
-     through a 4-layer transformer, and a zero-initialized projection writes the result.
-
-   The first version had only the MetaQuery path. Its outputs for different activations pointed 92% in the same
-   direction, and with every loss tried it learned one shared conditioning that ignored the activation.
-3. **Picture.** Klein (frozen) runs its own 4-step Euler sampler at 384 px from that conditioning.
-4. **Readback.** Qwen3-VL reads the picture in the same context the source activation came from, with the picture in
-   place of the content:
-   - a caption chat "Picture this scene in your mind: {caption} ..." becomes "... in your mind: [picture] ...";
-   - a character chat "You are {x}. ..." becomes "You are [picture]. ...".
-
-   The new activation is compared with the source activation directly, after standardizing each dimension by its
-   training mean and spread (fixed constants). No probe or readout is fitted.
-
-## Sources of activations
-
-| source | what Qwen3-VL gets | ground truth |
+| what is drawn | method | result |
 |---|---|---|
-| `see` | a real photo (COCO or CC3M) and "keep it in mind, just reply OK"; no caption anywhere | the photo |
+| Qwen3-VL-8B's hidden thought: "Think of X. Don't name it or describe it. Just reply OK.", only the positions after "X." | its own layer-28 states, no map, no training | right answer top-1 among 48 for 79% (last layer: 54%) |
+| the same, X described in two steps ("the most famous painting by Leonardo da Vinci") | its own layer-30 states | 58% (last layer: 38%) |
+| Qwen3-VL-4B looking at a photo, one reply-start activation | adapter trained through the generator on the photo | true photo top-1 among 100 for 56%, top-5 89%; 61% best of 4 by readback |
+| Qwen3-VL-4B's hidden thought "Think of X" | adapter trained on Turbo's own path from captions, half in the thought wording | right object top-1 among 24 for 79% (ridge map: 38%) |
+
+Scores are SigLIP 2 (so400m/16-512) ranks, for thoughts with each label's offset removed (see the depth lens); no
+method trains on SigLIP. Chance is 2% among 48, 1% among 100 and 4% among 24.
+
+**Best method.** For a model's own thoughts, draw a mid layer's own states (layers 28-32 of 36) at the positions after
+the thought, unmapped and untrained: nothing in it was fit to a label, and it beats the last layer the generator was
+built for. For another model's activation, start from a ridge map into the generator's input space and train a
+residual through the frozen generator: on the photo's own flow-matching loss when the source saw a photo, and on
+Turbo's own sampling path from the caption ("teach") when the source read text. At drawing time, draw 4 pictures and
+keep the one the source model reads back closest to its own activation.
+
+**What the lens shows.** The positions right after a thought hold it: when one thought is mixed into another by hand,
+the pictures and the model's answer move together. But the model's later answer is read from the words' own
+positions, not these, so at a fixed mix a picture does not predict which way the answer goes (below).
+
+## A picture lens across depth (`vlens depth`)
+
+A tuned lens with a picture as the readout. For each layer L of Qwen3-VL-8B, a ridge map carries the layer-L state at
+a position to the last-layer state at the same position (fit on 137,809 token pairs from 4,000 contexts: photos,
+captions, and for a quarter "Think of this: {caption}"; held-out fit 0.89 at layer 8 to 0.97 at layer 34). The
+untouched Qwen-Image-2.1-Turbo then draws the mapped states, or the layer's own states with no map. Prompts are "Think
+of X. Don't name it or describe it. Just reply OK.", and only the positions after "X." are drawn, so the generator
+never reads the words. 48 answers are each named ("Think of the Mona Lisa.") and described in two steps ("Think of the
+most famous painting by Leonardo da Vinci."). A picture is scored by the SigLIP 2 rank of its label among the 48
+(chance 2%).
+
+![two-step descriptions drawn from each layer's own states](docs/depth_own_states.png)
+
+Six two-step answers that the last layer loses, drawn from each layer's own states with no map.
+
+| top-1 among 48, by layer | 8 | 12 | 16 | 20 | 24 | 26 | 28 | 30 | 32 | 34 | 36 (last) |
+|---|---|---|---|---|---|---|---|---|---|---|---|
+| named, mapped | 4% | 17% | 15% | 15% | 17% | 31% | 48% | 60% | 56% | 54% | 54% |
+| named, the layer's own states | | | 8% | 12% | 17% | 58% | 79% | 73% | 73% | 69% | 54% |
+| two steps, mapped | 6% | 17% | 19% | 15% | 15% | 31% | 33% | 50% | 50% | 38% | 38% |
+| two steps, the layer's own states | | | 10% | 15% | 29% | 38% | 46% | 58% | 54% | 52% | 38% |
+
+Each label's SigLIP similarity is standardized across the 48 pictures of a column before ranking: with plain
+similarities a few labels ("a lighthouse", "the Colosseum") outscore the true label for many pictures, and a clearly
+drawn Eiffel Tower ranked 14th. Plain ranks are 0-10 points lower and order the layers the same way.
+
+Both kinds become drawable at about the same depth, from layer 26 on, and are more drawable at layers 28-34 than at
+the last layer, the one the generator was trained on, where a default picture (a lioness, an elephant figurine)
+often replaces the answer. The layer's own states, with no map, draw thoughts best: layers 28-32 give 73-79% of named
+answers and layer 30 58% of two-step ones, against 54% and 38% at the last layer. Many of these pictures come out as
+sheets with fake text around the object, a style last-layer states rarely give. The maps help only
+on photos (16 photos, layer 34: 69% mapped, 38% with no map), so maps fit mostly on photo and caption positions lose
+part of what thought positions hold.
+
+Two-step answers are drawn less often, not later. With the layers' own states (plain ranks), 32 of 48 named answers and 22 of 48
+two-step answers stay top-1 from some layer through layer 34, and for the 21 answers that do both, the two-step one
+arrives 0.4 layers later on average (95% bootstrap interval -0.9 to 1.6); with the maps, 0.0 layers (-2.2 to 2.0, 13
+answers). Single examples look like a sequence (Jimi Hendrix's instrument is a man with a saxophone at layers 20-24
+and an electric guitar at 28-32; the Nemo description draws a peacock through layer 24, a blue fish at 28 and a
+clownfish at 32), but the paired counts do not show two-step answers forming later.
+
+A choice the prompt leaves open is not drawn. In "Let's play a guessing game. Secretly choose an animal whose name
+starts with the letter K." with the same ending, for 6 categories and 14 letters, the 8B is afterwards asked in the same
+chat (it replied OK) what it chose (Kangaroo; all 84 answers start with the right letter, and the 14 of each category
+differ). Ranked among the 14 answers of the category (chance 7%), no layer, mapped or not, draws the answer it later
+gives above chance (best 11%, or 13% with each label's offset removed), also for the 36 choices that 7 or 8 of 8 sampled answers repeat. At most the category
+shows: the same cartoon animal for every animal letter and the same palace for every landmark; the other categories
+get the same few generic pictures whatever the letter. An answer
+determined by a description is drawn from layer 28 on; a choice under a spelling constraint is not drawable at these
+positions before the model is asked for it.
+
+## Faithful to what the model holds
+
+A picture should show what the model holds, also where that is wrong, rather than what we asked it to think of.
+
+**The model's own word for it** (`VLENS_DEPTH_SETS=faithful`). "Think of the kind of creature Dory from Finding Nemo
+is." with the think ending, for 48 cartoon creatures and the 48 two-step descriptions; afterwards, in the same chat
+(it replied OK), the 8B says what it was thinking of. Its answer differs from our key for 35 of the 96, and for 16 of
+them it names a different thing rather than a synonym or a vaguer word: "Clownfish" for Dory and for Bruce the shark,
+"Deer" for Bambi's skunk Flower, "Human-like being" for Pascal the chameleon, "Carrot" for Cinderella's pumpkin,
+"Bongo drums" for Lisa Simpson's saxophone. On those 16 the pictures follow neither side consistently. Flower is drawn
+as a deer from layer 32's own states, layer 30 mapped and the last layer, Bruce as a clownfish and Pascal as a boy
+from layers 30-32's own states: the picture shows the
+model's mistake. Dory is drawn as a blue tang at every layer although the model then answers clownfish, and the pink
+bird that stands on one leg is a grey wading bird although it then answers Pikachu: the state holds the right thing
+and the later answer loses it. For the fruit SpongeBob lives in, layers 28-32 draw SpongeBob himself. SigLIP 2's
+choice between the model's answer and the key, with each item's margin on the other 95 pictures subtracted (vague answers
+like "Sea creature" otherwise win on any picture), sides with the model's answer for 25-62% of the 16, depending on
+the layer. An answer given afterwards is a later readout of its own, so it cannot serve as the truth about the state
+at the drawn positions.
+
+**Truth set by mixing** (`vlens swap`). For 46 pairs of the 48 named answers whose
+prompts have the same token length ("Think of the Eiffel Tower." and "Think of the Colosseum."), the prompt for X runs
+with its states at layer 16 or 24 mixed toward the prompt for Y, h = (1 - a) h_X + a h_Y, at every position from the
+answer's words to the end, for a from 0.45 to 0.65. The model is then asked in the same chat what it was thinking of,
+and the pictures are drawn from the same mixed states at the usual positions after the words (512 px, as above). The
+model's answer moves from X to Y over that range (Y for 7% of pairs at a = 0.45 and 91% at 0.65, mixed at layer 16;
+4% and 78% at layer 24), and on average the pictures move with it: the 8B looking at the layer-32 picture picks Y
+for 13% at 0.45 and 87% at 0.65 (mixed at layer 16). Within a pair, pictures where the model answers Y look more like Y than pictures
+where it answers X (SigLIP Y-minus-X, AUC 0.83-0.86 at layers 28-32, 0.75 at the last layer), though the mix weight
+differs between them. At the same layer and weight, the pictures do not tell which pairs the model answers Y for:
+with each pair's unmixed picture subtracted (SigLIP likes some labels more than others), AUC 0.48-0.53 at layers
+28-32 and 0.59 at the last layer, and the 8B's own pick 0.44-0.48. The positions the lens draws hold the thought but
+are not where the answer comes from: mixing only them toward Y's states, up to replacing them, at layer 20, 24 or 28, changed
+the answer in none of the 24 settings tried (2 pairs), and the forced choice "A) X B) Y" never moved at all (both
+names are in that question, and the model can match them against the prompt's words). So the depth lens shows what
+the model holds right after a thought, which tracks the thought; the answer it gives later is read from the words'
+own positions, which the lens does not draw. Drawing those positions puts the words themselves in front of the
+generator.
+
+## Sources of a Qwen3-VL-4B activation
+
+| source | what Qwen3-VL-4B gets | ground truth |
+|---|---|---|
+| `see` | a real COCO photo and "keep it in mind, just reply OK"; no caption anywhere | the photo |
 | `inj` | a text-only chat with no image and no description. The see context's states at the 5 reply-start positions after layer 8 are copied in, bypassing tokens, and the model computes on from there | the photo |
 | `hold` | the photo's caption in a text-only chat, under 7 training wordings and 2 test wordings | the photo |
-| `char` | "You are <character>" chats (264 characters, 53 held out) | none |
 
-## Training
-
-- **Stage B (oracle style, supervised), end to end.** The adapter's conditioning goes through klein's 4 sampling
-  steps and the VAE decoder with gradients on; the picture is compared with the real photo in DINOv2-base features
-  (1 - cosine of the class tokens, plus the mean over the 256 patch tokens of 1 - cosine, so both content and layout
-  count). Klein is frozen and only its conditioning is trained, so every picture is a klein picture.
-  - A flow-matching prior on the undistilled klein base 4B (same architecture and conditioning space) keeps the
-    conditioning in the region klein draws photos from.
-  - Flow matching alone did not work. On the step-distilled klein its error against a real photo is lowest for
-    conditionings that make it draw a blurry average (at the first step the blank conditioning scored 1.10, the true
-    caption 1.58), and the adapter learned exactly that, one average-photo conditioning that ignored the activation.
-    On klein base the true caption beats the blank conditioning at every noise level, but the per-sample signal is
-    small (true caption vs a shuffled one: 0.037), and in 500 steps the adapter's gain over shuffled pairs was 0.0001.
-  - Held-out checks: the flow-matching loss and the DINOv2 loss of 8 test items per source, each with its gain over
-    shuffled activation-photo pairs.
-- **Stage C (NLA style, unsupervised reconstruction added).** The adapter makes a picture through klein's 4 sampling
-  steps and the VAE decoder, and Qwen3-VL reads it back in the source's own context; gradients flow through all of
-  these.
-  - The loss is the mean squared error between the standardized readback and source activations: the picture must
-    let the model rebuild its own activation.
-  - This loss needs no photo or label, so character activations train on it alone.
-  - The stage B loss stays on, to keep pictures natural and to limit hiding information in pixel patterns that only
-    the reader decodes.
-
-## Evaluation
-
-- **Test sets.** 1,000 held-out photos (500 COCO, 500 CC3M) under 4 sources, plus 53 held-out characters.
-- **Reconstruction.** Fraction of variance explained between the readback and the source activation (standardized).
-  Two references: the real photo read back in the same context (how much any picture could explain), and shuffled
-  pairs (no item information).
-- **Readback rank.** The source's rank among all 1,000 sources.
-- **SigLIP 2 rank.** The real photo's rank among the 1,000 real photos by SigLIP 2 (so400m/16-512) image-image
-  similarity. No stage trains on this scorer.
-- **Text route.** Klein given the caption as an ordinary prompt: the text-bottleneck reference.
-- **Robustness.** Each picture is read back again after degradations a viewer barely notices (256 px JPEG, JPEG
-  quality 30, half resolution), with real photos degraded the same way as the reference. If a picture's
-  reconstruction falls much further than the real photos' does, its information sits in pixel patterns that only the
-  reader decodes, not in the scene.
-- **Prior control.** Random activations with the same per-dimension mean and spread as real ones. If these also
-  produce confident, meaningful scenes, the pictures reflect klein's prior rather than Qwen's state.
-
-## A real LLM's own states, no training (`vlens native`)
-
-Qwen-Image-2.1 (Alibaba, September 2026) generates pictures from the last-layer states of Qwen3-VL-8B, and its encoder
-is the public Qwen3-VL-8B-Instruct checkpoint (checked tensor by tensor). When the pipeline edits a photo, the photo's
-own positions are replaced by its VAE latents, so Qwen3-VL's states at the image tokens never reach the generator;
-only its states at the text positions do, including the positions after the photo, which have attended to it.
-- **States only, no pixels:** Qwen3-VL-8B looks at a photo inside the pipeline's edit template; the generator gets
-  only its last-layer states at the text positions. With the vlens see prompt after the photo (33 positions) the
-  pictures come back as the photo's scene: a motorcycle rider, a long-haired girl, a kitchen, wooden spoons,
-  bathrooms (first 8 test photos in order, 7 recognisable). The last 5 positions alone keep much less.
-- **Concept steering:** + s x (typical state size) along a concept direction after layer 18, at every position of a
-  blank prompt (the direction: mean reply-start state of photos whose captions name the concept minus that of all
-  photos; the raw gap is only 2-4% of the state size, which is why fixed multiples of it changed nothing). At s = 1
-  the dog, cat and horse directions draw a dog, a cat and a rider on a horse; s = 4 gives noise. Asked what it is
-  thinking about in the same steered state, Qwen3-VL-8B names the concept for 8 of 16 ("You're thinking about the
-  dog", "Boeing 737 MAX 8", "British Rail Class 47 Locomotive", "A small boat on a calm sea").
-- **Neuron steering:** the single MLP neuron of layer 18 that best separates those photos, raised until its write
-  has the same size: no recognisable effect on pictures or words.
-
-Every picture in a row uses the same noise.
+The activation is the residual stream after decoder layers 9, 18 and 27 at the last reply-start position (3 x 2,560
+numbers).
 
 ## Adapter into Qwen-Image-2.1 (`vlens qimg`)
 
@@ -157,6 +184,7 @@ the same 100 test photos, seed and size as above.
 | reads a caption, Turbo's flow-matching loss on the photo | 15% | 44% | 10% | 17% |
 | reads a caption, Turbo's own path from the caption text (teach) | 24% | 68% | 10% | 25% |
 | the same, 100 more minutes | 32% | 70% | 10% | 33% |
+| the same 100 minutes, every other path the adapter's own drawing | 29% | 75% | 9% | 32% |
 | the same, half the training captions in the thought wording | 36% | 72% | 8% | 40% |
 | (the caption text itself, drawn by Turbo: the ceiling for teach) | 70% | 94% | | |
 
@@ -183,6 +211,10 @@ in order. Riddles, a wording never trained, do not improve (25% against 33%), an
 COCO subjects (giraffe, zebra, pizza, train). Hidden-thought ranks here are over labels with each label's offset
 removed, as in the depth lens below.
 
+Training on the adapter's own drawing path for every other caption (Turbo's velocity under the caption text as the
+target at the points the adapter itself reaches, against drift off the path) changed little in the same 100 minutes:
+29% top-1 and 75% top-5 against 32% and 70%, and the Think-of-X prompts 58% against 54%.
+
 Taking the loss from the undistilled base model
 (Qwen/Qwen-Image-2.1) instead, with Turbo still drawing, made both kinds worse within 15 minutes (quick eval on 32
 test photos: from the photo 38% to 16% top-1, from a caption 19% to 3%); stopped.
@@ -193,68 +225,51 @@ photo loss's, pushed the photo loss up (0.45 to 0.49); stopped. Self-distillatio
 source, the one read back closest kept, flow matching on it) cut the quick eval from 38% to 16% top-1 in 100 steps
 while the mean readback similarity fell; stopped.
 
-## A picture lens across depth (`vlens depth`)
+## A real LLM's own states, no training (`vlens native`)
 
-A tuned lens with a picture as the readout. For each layer L of Qwen3-VL-8B, a ridge map carries the layer-L state at
-a position to the last-layer state at the same position (fit on 137,809 token pairs from 4,000 contexts: photos,
-captions, and for a quarter "Think of this: {caption}"; held-out fit 0.89 at layer 8 to 0.97 at layer 34). The
-untouched Qwen-Image-2.1-Turbo then draws the mapped states, or the layer's own states with no map. Prompts are "Think
-of X. Don't name it or describe it. Just reply OK.", and only the positions after "X." are drawn, so the generator
-never reads the words. 48 answers are each named ("Think of the Mona Lisa.") and described in two steps ("Think of the
-most famous painting by Leonardo da Vinci."). A picture is scored by the SigLIP 2 rank of its label among the 48
-(chance 2%).
+Qwen-Image-2.1 (Alibaba, September 2026) generates pictures from the last-layer states of Qwen3-VL-8B, and its encoder
+is the public Qwen3-VL-8B-Instruct checkpoint (checked tensor by tensor). When the pipeline edits a photo, the photo's
+own positions are replaced by its VAE latents, so Qwen3-VL's states at the image tokens never reach the generator;
+only its states at the text positions do, including the positions after the photo, which have attended to it.
+- **States only, no pixels:** Qwen3-VL-8B looks at a photo inside the pipeline's edit template; the generator gets
+  only its last-layer states at the text positions. With the vlens see prompt after the photo (33 positions) the
+  pictures come back as the photo's scene: a motorcycle rider, a long-haired girl, a kitchen, wooden spoons,
+  bathrooms (first 8 test photos in order, 7 recognisable). The last 5 positions alone keep much less.
+- **Concept steering:** + s x (typical state size) along a concept direction after layer 18, at every position of a
+  blank prompt (the direction: mean reply-start state of photos whose captions name the concept minus that of all
+  photos; the raw gap is only 2-4% of the state size, which is why fixed multiples of it changed nothing). At s = 1
+  the dog, cat and horse directions draw a dog, a cat and a rider on a horse; s = 4 gives noise. Asked what it is
+  thinking about in the same steered state, Qwen3-VL-8B names the concept for 8 of 16 ("You're thinking about the
+  dog", "Boeing 737 MAX 8", "British Rail Class 47 Locomotive", "A small boat on a calm sea").
+- **Neuron steering:** the single MLP neuron of layer 18 that best separates those photos, raised until its write
+  has the same size: no recognisable effect on pictures or words.
 
-![two-step descriptions drawn from each layer's own states](docs/depth_own_states.png)
+Every picture in a row uses the same noise.
 
-Six two-step answers that the last layer loses, drawn from each layer's own states with no map.
+## Earlier: an adapter into FLUX.2 [klein] (did not work)
 
-| top-1 among 48, by layer | 8 | 12 | 16 | 20 | 24 | 26 | 28 | 30 | 32 | 34 | 36 (last) |
-|---|---|---|---|---|---|---|---|---|---|---|---|
-| named, mapped | 4% | 17% | 15% | 15% | 17% | 31% | 48% | 60% | 56% | 54% | 54% |
-| named, the layer's own states | | | 8% | 12% | 17% | 58% | 79% | 73% | 73% | 69% | 54% |
-| two steps, mapped | 6% | 17% | 19% | 15% | 15% | 31% | 33% | 50% | 50% | 38% | 38% |
-| two steps, the layer's own states | | | 10% | 15% | 29% | 38% | 46% | 58% | 54% | 52% | 38% |
-
-Each label's SigLIP similarity is standardized across the 48 pictures of a column before ranking: with plain
-similarities a few labels ("a lighthouse", "the Colosseum") outscore the true label for many pictures, and a clearly
-drawn Eiffel Tower ranked 14th. Plain ranks are 0-10 points lower and order the layers the same way.
-
-Both kinds become drawable at about the same depth, from layer 26 on, and are more drawable at layers 28-34 than at
-the last layer, the one the generator was trained on, where a default picture (a lioness, an elephant figurine)
-often replaces the answer. The layer's own states, with no map, draw thoughts best: layers 28-32 give 73-79% of named
-answers and layer 30 58% of two-step ones, against 54% and 38% at the last layer. Many of these pictures come out as
-sheets with fake text around the object, a style last-layer states rarely give. The maps help only
-on photos (16 photos, layer 34: 69% mapped, 38% with no map), so maps fit mostly on photo and caption positions lose
-part of what thought positions hold.
-
-Two-step answers are drawn less often, not later. With the layers' own states (plain ranks), 32 of 48 named answers and 22 of 48
-two-step answers stay top-1 from some layer through layer 34, and for the 21 answers that do both, the two-step one
-arrives 0.4 layers later on average (95% bootstrap interval -0.9 to 1.6); with the maps, 0.0 layers (-2.2 to 2.0, 13
-answers). Single examples look like a sequence (Jimi Hendrix's instrument is a man with a saxophone at layers 20-24
-and an electric guitar at 28-32; the Nemo description draws a peacock through layer 24, a blue fish at 28 and a
-clownfish at 32), but the paired counts do not show two-step answers forming later.
-
-A choice the prompt leaves open is not drawn. In "Let's play a guessing game. Secretly choose an animal whose name
-starts with the letter K." with the same ending, for 6 categories and 14 letters, the 8B is afterwards asked in the same
-chat (it replied OK) what it chose (Kangaroo; all 84 answers start with the right letter, and the 14 of each category
-differ). Ranked among the 14 answers of the category (chance 7%), no layer, mapped or not, draws the answer it later
-gives above chance (best 11%, or 13% with each label's offset removed), also for the 36 choices that 7 or 8 of 8 sampled answers repeat. At most the category
-shows: the same cartoon animal for every animal letter and the same palace for every landmark; the other categories
-get the same few generic pictures whatever the letter. An answer
-determined by a description is drawn from layer 28 on; a choice under a spelling constraint is not drawable at these
-positions before the model is asked for it.
+The first version drew with FLUX.2 [klein] 4B, a 4-step distilled generator that reads a Qwen3 text encoder's states,
+through an adapter trained from Qwen3-VL-4B's activation (layers 9, 18 and 27 at the reply start, 7,680 numbers). Every
+connector tried learned one conditioning for every activation: a MetaQuery-style adapter (its outputs for different
+activations pointed 92% in the same direction), flow matching on the distilled model (its error against a real photo
+is lowest for a blurry average picture: at the first step the blank conditioning scored 1.10 and the true caption
+1.58), flow matching on the undistilled base model (true caption against a shuffled one: 0.037; the adapter's gain
+over shuffled pairs after 500 steps: 0.0001), and end-to-end DINOv2 through the 4 steps with a direct linear path.
+The code is still here (`vlens data`, `train`, `cycle`, `eval`, `robust`; `scripts/run_all.sh`,
+`scripts/test_tiny.sh`).
 
 ## Run
 
 ```
 pip install -e .
-scripts/test_tiny.sh                      # every stage in minutes, small random Qwen3-VL (plumbing only)
-scripts/run_all.sh /data/work /data/run   # full run on one 80 GB GPU, about 4 hours on an A100
+python -m vlens depth OUT [N_FIT]        # picture lens across Qwen3-VL-8B's layers (VLENS_DEPTH_SETS, _LAYERS, _RAW)
+python -m vlens swap OUT                 # faithfulness: one thought mixed into another, pictures against the answer
+python -m vlens qimg OUT [N_TRAIN]       # ridge maps from Qwen3-VL-4B's activation to Qwen-Image-2.1's input
+python -m vlens pnla OUT MAPS [N_TRAIN]  # adapter trained through the generator
+python -m vlens native OUT               # Qwen3-VL-8B's own states: photos, steering
 ```
 
-All models and data are public: Qwen/Qwen3-VL-4B-Instruct, black-forest-labs/FLUX.2-klein-4B and FLUX.2-klein-base-4B (Apache 2.0), facebook/dinov2-base,
-google/siglip2-so400m-patch16-512, yerevann/coco-karpathy (COCO image URLs), pixparse/cc3m-wds.
-
-## Status
-
-The first full run is in progress. Results will be added here.
+Each runs on one 80 GB GPU. The best adapters came from `VLENS_PNLA_KIND=see` (65 + 60 minutes from the ridge map) and
+`VLENS_PNLA_KIND=hold VLENS_PNLA_FM=0 VLENS_PNLA_TEACH=1 VLENS_PNLA_THINKW=1` (65 + 100 minutes, continued with
+`VLENS_PNLA_INIT`). All models and data are public: Qwen/Qwen-Image-2.1-Turbo (its encoder is Qwen3-VL-8B-Instruct),
+Qwen/Qwen3-VL-4B-Instruct, google/siglip2-so400m-patch16-512, yerevann/coco-karpathy (COCO image URLs).

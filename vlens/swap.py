@@ -12,7 +12,7 @@ thinking of? A) X B) Y" (logit toward Y minus toward X; the order flips for ever
 A faithful picture says Y exactly where the model says Y. The mix weight a predicts both, so the scores compare pairs
 at the same (LP, a): AUC of the picture's SigLIP 2 Y-minus-X score for the model's side, and the 8B judge's A/B on
 the picture against the cell's majority side.
-Env: VLENS_SWAP_LP (patch layers, default 16,24), VLENS_SWAP_ALPHA (default 0.25,0.4,0.55,0.7), VLENS_SWAP_COLS
+Env: VLENS_SWAP_LP (patch layers, default 16,24), VLENS_SWAP_ALPHA (default 0.45,0.5,0.55,0.6,0.65), VLENS_SWAP_COLS
 (raw layers to draw; the last layer is always drawn; default 28,30,32).
 Usage: python -m vlens swap OUT"""
 from .common import *
@@ -20,7 +20,7 @@ from .native import Native
 from .depth import PAIRS, TAIL, ASK_THING, tail_len, judge, same
 
 LP = tuple(int(x) for x in os.environ.get('VLENS_SWAP_LP', '16,24').split(','))
-ALPHA = tuple(float(x) for x in os.environ.get('VLENS_SWAP_ALPHA', '0.25,0.4,0.55,0.7').split(','))
+ALPHA = tuple(float(x) for x in os.environ.get('VLENS_SWAP_ALPHA', '0.45,0.5,0.55,0.6,0.65').split(','))
 COLS = tuple(int(x) for x in os.environ.get('VLENS_SWAP_COLS', '28,30,32').split(','))
 SEED = 11
 ASK_FC = "OK<|im_end|>\n<|im_start|>user\nWhich were you thinking of? A) {a} B) {b} Answer with A or B only.<|im_end|>\n<|im_start|>assistant\n"
