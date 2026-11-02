@@ -19,11 +19,17 @@ ridge map), plus the mean state. Losses:
           one closest to the source activation (standardized cosine, a choice among draws of one source, so the
           pictures' shared offset cancels) is kept, and the flow-matching loss on its latents trains the adapter; see only
   anchor  mean squared distance of the states from the ridge map's
+  teach   hold only, no photo: Turbo draws the caption itself (the pipeline's own text-to-image encoding of the
+          caption by Qwen3-VL-8B, 8 steps from seeded noise), and the adapter's states have to give the same velocity
+          at every point of that path (TEACH_B new paths per step into a buffer of BUF, BS points from the buffer).
+          Unlike fm on the photo, the target is fixed by the caption and the noise, so nothing pulls the picture
+          toward an average of the photos a caption allows; the caption text drawn this way is scored as its ceiling
 Kinds: see (the 4B looked at the photo) or hold (the 4B read one of its captions in a HOLD_TR wording).
 Eval on qimg's 100 COCO test photos with qimg's seed and size, ridge map vs trained: SigLIP 2 rank of each picture among
 the photos, readback rank (see chat) among the test photos' see activations, test flow-matching loss; for hold also the
 hidden-thought sets (think, riddle, character) ranked among their labels.
 Usage: python -m vlens pnla OUT MAPS [N_TRAIN]"""
+import gc
 from .common import *
 from .models import Reader
 from .qimg import ranks, summary, THINK, THINK_T, RIDDLE_T
@@ -40,6 +46,8 @@ RFT_K, RFT_BS = int(os.environ.get('VLENS_PNLA_RFT', 0)), int(os.environ.get('VL
 INIT = os.environ.get('VLENS_PNLA_INIT', '')       # a pnla_adapter.pt to continue from (its residual and mean state)
 FMGEN = os.environ.get('VLENS_PNLA_FMGEN', '')     # e.g. Qwen/Qwen-Image-2.1: the undistilled base gives the flow-matching loss; Turbo still draws
 PEEK_MIN = float(os.environ.get('VLENS_PNLA_PEEK', 15))     # minutes between quick evals during training (32 test photos)
+W_TEACH = float(os.environ.get('VLENS_PNLA_TEACH', 0))       # weight of the caption-path velocity loss (hold)
+TEACH_B, BUF = int(os.environ.get('VLENS_PNLA_TEACHB', 2)), int(os.environ.get('VLENS_PNLA_BUF', 4000))
 N_TEST, N_SHOW, SEED = int(os.environ.get('VLENS_QIMG_TEST', 100)), 12, 11
 STORIES = [['A family drives to a sunny beach and opens a red umbrella.', 'The kids build a sandcastle near the water.',
             'A dog runs along the shore chasing seagulls.', 'Dark clouds roll in over the sea.',
@@ -47,7 +55,7 @@ STORIES = [['A family drives to a sunny beach and opens a red umbrella.', 'The k
            ['A baker cracks eggs into a bowl of flour in a small kitchen.', 'She pours the batter into a round pan and puts it in the oven.',
             'The cake comes out of the oven golden brown.', 'She covers it with white frosting and strawberries.',
             'Candles are lit on the cake at a birthday party.', 'A little girl blows out the candles while her friends clap.']]
-assert KIND in ('see', 'hold') and not ((W_RB or RFT_K) and KIND != 'see')
+assert KIND in ('see', 'hold') and not ((W_RB or RFT_K) and KIND != 'see') and not (W_TEACH and KIND != 'hold')
 
 
 class Gen:
@@ -60,6 +68,8 @@ class Gen:
             self.pipe = QwenImage21Pipeline(FlowMatchEulerDiscreteScheduler(), AutoencoderKLQwenImage21(base_dim=8, decoder_base_dim=8, num_res_blocks=1),
                                             None, proc, QwenImage21Transformer2DModel(num_layers=2, num_attention_heads=1),
                                             sample_sigmas=[1.0, 0.9, 0.7, 0.4]).to(DEV, BF)
+        elif W_TEACH:                                     # Qwen3-VL-8B encodes the captions, then drop_encoder() frees it
+            self.pipe = QwenImage21Pipeline.from_pretrained(GEN, dtype=BF).to(DEV)
         else:
             self.pipe = QwenImage21Pipeline.from_pretrained(GEN, text_encoder=None, dtype=BF).to(DEV)
         self.pipe.set_progress_bar_config(disable=True)
@@ -94,13 +104,47 @@ class Gen:
         mu = 0.5 + (0.9 - 0.5) / (8192 - 256) * (N - 256)
         return math.exp(mu) / (math.exp(mu) + (1 / u - 1))
 
-    def v(self, x, s, C, fm=False):
-        """velocity at packed latents x [B,N,ch], noise level s (float or [B]), states C [B,P,4096]; fm=True uses the
-        flow-matching model (the base when FMGEN is set)"""
+    def v(self, x, s, C, fm=False, mask=None):
+        """velocity at packed latents x [B,N,ch], noise level s (float or [B]), states C [B,P,4096] (mask [B,P]: which
+        are real, right-padded as the pipeline pads); fm=True uses the flow-matching model (the base when FMGEN is set)"""
         B, N = x.shape[:2]; h = math.isqrt(N); tr = self.fm_tr if fm and self.fm_tr is not None else self.tr
         m = torch.cat([torch.zeros(B, C.shape[1], dtype=torch.bool, device=DEV), torch.ones(B, N // 4, dtype=torch.bool, device=DEV)], 1)
+        em = torch.ones(B, C.shape[1], dtype=torch.long, device=DEV) if mask is None else mask.to(DEV).long()
         return tr(hidden_states=x, timestep=self.t(s, B), encoder_hidden_states=C, img_shapes=[[(1, h, h)]] * B, img_mask=m,
-                       encoder_hidden_states_mask=torch.ones(B, C.shape[1], dtype=torch.long, device=DEV), return_dict=False)[0][:, -N:]
+                       encoder_hidden_states_mask=em, return_dict=False)[0][:, -N:]
+
+    @torch.no_grad()
+    def caption_states(self, texts, batch=64):
+        """the pipeline's own text-to-image encoding of each text (Qwen3-VL-8B, its template, the system prompt
+        dropped): a list of [len, 4096] fp16 on the CPU"""
+        if TINY:
+            return [torch.randn(3 + len(t) % 5, self.tr.config.context_in_dim).half() for t in texts]
+        out = []
+        for i in range(0, len(texts), batch):
+            e, m, _ = self.pipe._get_qwen_prompt_embeds(texts[i:i + batch], None, DEV)
+            out += [e[j, :int(m[j].sum())].half().cpu() for j in range(len(e))]
+        return out
+
+    def drop_encoder(self):
+        self.pipe.text_encoder = None; gc.collect(); torch.cuda.empty_cache()
+
+    @staticmethod
+    def pad(Es):
+        """list of [len, D] -> right-padded [B,P,D] bf16 and mask [B,P]"""
+        P = max(len(e) for e in Es)
+        E = torch.stack([torch.cat([e, e.new_zeros(P - len(e), e.shape[1])]) for e in Es]).to(DEV, BF)
+        M = torch.stack([torch.arange(P) < len(e) for e in Es]).to(DEV)
+        return E, M
+
+    @torch.no_grad()
+    def teach(self, Es, seeds, px):
+        """Turbo's 8-step path from each seed's noise under states Es: the point before each step and the velocity
+        there, [B, steps, N, ch] bf16 each, and the final latents"""
+        E, M = self.pad(Es); x = self.noise(seeds, px); xs, vs = [], []
+        for i in range(len(self.sig) - 1):
+            v = self.v(x, self.sig[i], E, mask=M).float(); xs.append(x); vs.append(v.to(BF))
+            x = (x.float() + (self.sig[i + 1] - self.sig[i]) * v).to(BF)
+        return torch.stack(xs, 1), torch.stack(vs, 1), x
 
     def noise(self, seeds, px):
         """the pipeline's starting noise for each seed (a CPU generator, bf16), packed"""
@@ -176,7 +220,7 @@ def collect(R, G, df, test):
     rng = random.Random(0)
     rows = [(i, HOLD_TE[0].format(c=c[0])) for i, c in enumerate(caps)] if test else \
            [(i, HOLD_TR[rng.randrange(len(HOLD_TR))].format(c=x)) for i, c in enumerate(caps) for x in c]
-    out = dict(z=torch.cat(Z), see=torch.cat(S), caps=caps, ims=ims)
+    out = dict(z=torch.cat(Z), see=torch.cat(S), caps=caps, ims=ims, rcap=[c[0] for c in caps] if test else [x for c in caps for x in c])
     if KIND == 'see':
         out.update(src=out['see'], idx=torch.arange(len(caps)))
     else:
@@ -295,8 +339,21 @@ def pnla(out, maps, n_train=12000):
     tr = collect(R, G, coco_table('train').sample(frac=1, random_state=0).head(int(n_train)), False)
     log('train photos', len(tr['caps']), 'sources', len(tr['src']), 'latents', tuple(tr['z'].shape), 'test photos', len(te['caps']))
     sig, sigt = siglip(); real = sig(te['ims']); see_z = (te['see'].float() - mu) / sd
-    res = dict(kind=KIND, init=INIT, fm_model=FMGEN or GEN, weights=dict(fm=W_FM, rb=W_RB, anchor=W_ANC, rft_k=RFT_K, rft_batch=RFT_BS), train_px=TR_PX, eval_px=EV_PX, n_train=len(tr['caps']), n_sources=len(tr['src']),
-               lr=LR, batch=BS, rb_batch=RB_BS, kmin=KMIN, tau=TAU, bank=BANK)
+    res = dict(kind=KIND, init=INIT, fm_model=FMGEN or GEN, weights=dict(fm=W_FM, rb=W_RB, anchor=W_ANC, rft_k=RFT_K, rft_batch=RFT_BS, teach=W_TEACH, teach_b=TEACH_B, buf=BUF),
+               train_px=TR_PX, eval_px=EV_PX, n_train=len(tr['caps']), n_sources=len(tr['src']), lr=LR, batch=BS, rb_batch=RB_BS, kmin=KMIN, tau=TAU, bank=BANK)
+    if W_TEACH:
+        TE_te, TE_tr = G.caption_states(te['rcap']), G.caption_states(tr['rcap']); G.drop_encoder()
+        log('caption states', len(TE_tr), 'train,', len(TE_te), 'test; lengths', min(len(e) for e in TE_tr), 'to', max(len(e) for e in TE_tr))
+        with torch.no_grad():                               # the written-out padded path against the pipeline's own
+            Es, seeds = TE_te[:3], [SEED, SEED + 1, SEED + 2]; E, M = G.pad(Es)
+            mine = G.teach(Es, seeds, TR_PX)[2].float()
+            theirs = G.pipe(prompt_embeds=E, prompt_embeds_mask=M.long(), height=TR_PX, width=TR_PX, latents=G.noise(seeds, TR_PX), output_type='latent').images.float()
+            res['teach_check'] = round(float((mine - theirs).norm() / theirs.norm()), 5); log('teacher path check: relative difference from the pipeline', res['teach_check'])
+        P = [G.picture(TE_te[i], SEED) for i in range(len(TE_te))]          # the caption text drawn: the ceiling for teach
+        for i, p in enumerate(P[:N_SHOW]):
+            p.save(out / 'pics' / f'caption_{i}.jpg', quality=90)
+        q = (torch.cat([R.see(to_t([square(p) for p in P[i:i + 32]])).cpu() for i in range(0, len(P), 32)]) - mu) / sd
+        res['caption_text'] = dict(siglip=summary(ranks(sig(P), real)), readback_centered=summary(ranks(q - q.mean(0), see_z))); log('caption text', res['caption_text'])
     res['ridge'], pr = evaluate(R, G, A, te, True, sig, real, see_z, mu, sd, out)
     params = [p for p in A.parameters() if p.requires_grad]
     opt = torch.optim.AdamW(params, lr=LR, weight_decay=0.0, betas=(0.9, 0.99))
@@ -304,6 +361,19 @@ def pnla(out, maps, n_train=12000):
     zb = F.normalize((tr['see'].float() - mu) / sd, dim=-1).to(DEV)            # rb's positives and bank (see sources)
     sigs = torch.tensor(G.sig[:-1], device=DEV); hist, acc = [], {}; t0 = time.monotonic(); step = 0; off = None   # off: running mean readback of the pictures
     next_peek = PEEK_MIN; res['peeks'] = []          # quick evals: the first 32 test photos drawn at the training size, ranked among all 100
+    if W_TEACH:                                      # buffer of caption paths: points, velocities, source row
+        N, ch = Z.shape[1], Z.shape[2]; ns = len(sigs); filled = 0; head = 0
+        BX = torch.empty(BUF, ns, N, ch, dtype=BF, device=DEV); BV = torch.empty_like(BX); BR = torch.zeros(BUF, dtype=torch.long, device=DEV)
+
+        def add_paths(n):
+            nonlocal filled, head
+            rows = torch.randint(len(SRC), (n,)).tolist(); xs, vs, _ = G.teach([TE_tr[r] for r in rows], torch.randint(1 << 30, (n,)).tolist(), TR_PX)
+            slots = [(head + j) % BUF for j in range(n)]
+            BX[slots], BV[slots], BR[slots] = xs, vs, torch.tensor(rows, device=DEV)
+            head = (head + n) % BUF; filled = min(BUF, filled + n)
+        for _ in range(8):
+            add_paths(8)
+        log('caption paths in the buffer', filled)
 
     @torch.no_grad()
     def peek():
@@ -319,7 +389,12 @@ def pnla(out, maps, n_train=12000):
             next_peek += PEEK_MIN; peek()
         for g in opt.param_groups:
             g['lr'] = LR * min(1.0, step / 50)
-        b = torch.randint(len(SRC), (BS,), device=DEV); C = A(SRC[b]); loss = 0.0; parts = {}
+        b = torch.randint(len(SRC), (BS,), device=DEV); C = A(SRC[b]) if (W_FM or W_ANC or W_RB or RFT_K) else None; loss = 0.0; parts = {}
+        if W_TEACH:
+            add_paths(TEACH_B)
+            e = torch.randint(filled, (BS,), device=DEV); k = torch.randint(ns, (BS,), device=DEV)
+            v = G.v(BX[e, k], sigs[k], A(SRC[BR[e]]).to(BF))
+            parts['teach'] = ((v.float() - BV[e, k].float()) ** 2).mean(); loss = loss + W_TEACH * parts['teach']
         if W_ANC:
             parts['anchor'] = ((C - A(SRC[b], True)) ** 2).mean(); loss = loss + W_ANC * parts['anchor']
         if W_FM:
