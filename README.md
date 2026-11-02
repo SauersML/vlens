@@ -110,16 +110,30 @@ reply-start activation (see, inj, hold) to those states and draws with the untou
 are scored by the SigLIP 2 rank of the true photo and by readback rank among the test photos, against the 8B's own
 states (ceiling) and the mean target (collapse control).
 
-First run (6,000 COCO training photos, 100 held-out test photos, 512 px; SigLIP 2 top-1 / top-5 among the 100, chance
-1% / 5%):
+20,000 COCO training photos, 100 held-out test photos, 512 px; SigLIP 2 top-1 / top-5 among the 100, chance 1% / 5%
+(the first run, with 6,000 photos, in brackets):
 
 | pictures drawn from | top-1 | top-5 | median rank |
 |---|---|---|---|
 | Qwen3-VL-8B's own states (ceiling) | 43% | 76% | 1 |
-| Qwen3-VL-4B sees the photo | 29% | 67% | 2 |
-| Qwen3-VL-4B's reply-start states moved into a chat with no photo (inj) | 20% | 49% | 6 |
-| Qwen3-VL-4B reads only a caption (hold) | 13% | 33% | 9 |
+| Qwen3-VL-4B sees the photo | 33% (29%) | 74% (67%) | 1 |
+| the same, best of 4 draws chosen by readback | 49% | 77% | 1 |
+| Qwen3-VL-4B's reply-start states moved into a chat with no photo (inj) | 24% (20%) | 52% (49%) | 3 |
+| Qwen3-VL-4B reads only a caption (hold) | 22% (13%) | 50% (33%) | 4 |
 | the mean target (draws the same dog every time) | 1% | 5% | 49 |
+
+Best of 4 by readback is the NLA-style choice with no training: four pictures per photo with different noise, and
+Qwen3-VL-4B keeps the one whose reading of it, in the same see chat, is closest to its own activation on the photo.
+It lifts top-1 from 33% to 49%, past the 8B's own states; choosing with the photo itself (not available to a reader)
+gives 56%. Readback across photos is weaker than this: every generated picture's readback shares an offset of about
+0.83 of its standardized size, and ranked among the 100 sources the 8B's own pictures read back at median rank 34;
+with the pictures' mean readback removed, at median rank 9 (top-5 34%).
+
+One layer of the 4B's activation alone is enough for most of it: layer 9, 18 or 27 alone gives 32%, 27% or 30% top-1
+from the see chat, and 19%, 20% or 13% from a caption. Through the caption map, hidden thoughts of the 4B are drawn
+too: "Think of X. Don't name it or describe it." gives the right object top-1 among 24 for 29%, a riddle that never
+names it ("Riddle: I am a tall tower on a rocky coast ...") 21%, and "You are X. Stay in character." 25% among 12
+characters (chance 4%, 4% and 8%).
 
 Every klein connector before this (flow matching on the distilled or the base model, end-to-end DINOv2 through the
 4 steps, a direct linear path) learned one conditioning for every activation.
