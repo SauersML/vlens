@@ -37,6 +37,7 @@ BS, RB_BS, LR = int(os.environ.get('VLENS_PNLA_BS', 8)), int(os.environ.get('VLE
 KMIN, BANK, TAU = int(os.environ.get('VLENS_PNLA_KMIN', 2)), 4096, 0.07
 RERANK = int(os.environ.get('VLENS_PNLA_RERANK', 4))
 RFT_K, RFT_BS = int(os.environ.get('VLENS_PNLA_RFT', 0)), int(os.environ.get('VLENS_PNLA_RFTBS', 4))
+INIT = os.environ.get('VLENS_PNLA_INIT', '')       # a pnla_adapter.pt to continue from (its residual and mean state)
 FMGEN = os.environ.get('VLENS_PNLA_FMGEN', '')     # e.g. Qwen/Qwen-Image-2.1: the undistilled base gives the flow-matching loss; Turbo still draws
 PEEK_MIN = float(os.environ.get('VLENS_PNLA_PEEK', 15))     # minutes between quick evals during training (32 test photos)
 N_TEST, N_SHOW, SEED = int(os.environ.get('VLENS_QIMG_TEST', 100)), 12, 11
@@ -281,6 +282,10 @@ def pnla(out, maps, n_train=12000):
     R = Reader(); G = Gen(R.proc); log('loaded; kind', KIND, 'fm', W_FM, 'rb', W_RB, 'anchor', W_ANC, 'train px', TR_PX, 'sigmas', G.sig)
     km = fake_maps(R) if TINY else torch.load(maps, map_location='cpu')
     A = Adapter(km['maps'][KIND], km['pre']).to(DEV)
+    if INIT:
+        ck = torch.load(INIT, map_location='cpu'); assert ck['kind'] == KIND, (ck['kind'], KIND)
+        A.f.load_state_dict({k: v.float() for k, v in ck['f'].items()}); A.B.data.copy_(ck['B'].float()); A.ym.data.copy_(ck['ym'].float())
+        log('continuing from', INIT)
     mu, sd = km['see_mu'].float(), km['see_sd'].float(); mu_d, sd_d = mu.to(DEV), sd.to(DEV)
     te = collect(R, G, coco_table('test').head(N_TEST), True)
     with torch.no_grad():                                   # the written-out sampler against the pipeline's own
@@ -290,7 +295,7 @@ def pnla(out, maps, n_train=12000):
     tr = collect(R, G, coco_table('train').sample(frac=1, random_state=0).head(int(n_train)), False)
     log('train photos', len(tr['caps']), 'sources', len(tr['src']), 'latents', tuple(tr['z'].shape), 'test photos', len(te['caps']))
     sig, sigt = siglip(); real = sig(te['ims']); see_z = (te['see'].float() - mu) / sd
-    res = dict(kind=KIND, fm_model=FMGEN or GEN, weights=dict(fm=W_FM, rb=W_RB, anchor=W_ANC, rft_k=RFT_K, rft_batch=RFT_BS), train_px=TR_PX, eval_px=EV_PX, n_train=len(tr['caps']), n_sources=len(tr['src']),
+    res = dict(kind=KIND, init=INIT, fm_model=FMGEN or GEN, weights=dict(fm=W_FM, rb=W_RB, anchor=W_ANC, rft_k=RFT_K, rft_batch=RFT_BS), train_px=TR_PX, eval_px=EV_PX, n_train=len(tr['caps']), n_sources=len(tr['src']),
                lr=LR, batch=BS, rb_batch=RB_BS, kmin=KMIN, tau=TAU, bank=BANK)
     res['ridge'], pr = evaluate(R, G, A, te, True, sig, real, see_z, mu, sd, out)
     params = [p for p in A.parameters() if p.requires_grad]
