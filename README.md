@@ -159,8 +159,9 @@ From the see chat the trained pictures match the photos' layout and colour far b
 (43%), and the 4B reads them back closer to its own activation though readback was never trained. They are softer
 than the ridge map's pictures and sometimes blend objects. From a caption the same training washes the pictures out
 into blended, ghostly scenes: Turbo is distilled, so the condition that minimizes its denoising loss draws an average
-of the plausible pictures, and a caption allows many. Runs that take the loss from the undistilled base model
-(Qwen/Qwen-Image-2.1), with Turbo still drawing, are in progress.
+of the plausible pictures, and a caption allows many. Taking the loss from the undistilled base model
+(Qwen/Qwen-Image-2.1) instead, with Turbo still drawing, made both kinds worse within 15 minutes (quick eval on 32
+test photos: from the photo 38% to 16% top-1, from a caption 19% to 3%); stopped.
 
 Two readback losses failed. The direct one (the picture from one sampler step, decoded and read back, InfoNCE against
 4,096 train sources, weight 0.3 beside the photo loss) stayed at chance for 400 steps while its gradient, 40 times the
