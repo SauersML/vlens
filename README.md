@@ -193,18 +193,24 @@ Six two-step answers that the last layer loses, drawn from each layer's own stat
 
 | top-1 among 48, by layer | 8 | 12 | 16 | 20 | 24 | 26 | 28 | 30 | 32 | 34 | 36 (last) |
 |---|---|---|---|---|---|---|---|---|---|---|---|
-| named, mapped | 2% | 10% | 4% | 10% | 10% | 21% | 33% | 58% | 52% | 48% | 46% |
-| named, the layer's own states | | | 6% | 6% | 17% | 46% | 67% | 71% | 67% | 67% | 46% |
-| two steps, mapped | 6% | 8% | 8% | 10% | 12% | 21% | 27% | 38% | 35% | 31% | 31% |
-| two steps, the layer's own states | | | 0% | 2% | 15% | 21% | 33% | 48% | 48% | 46% | 31% |
+| named, mapped | 4% | 17% | 15% | 15% | 17% | 31% | 48% | 60% | 56% | 54% | 54% |
+| named, the layer's own states | | | 8% | 12% | 17% | 58% | 79% | 73% | 73% | 69% | 54% |
+| two steps, mapped | 6% | 17% | 19% | 15% | 15% | 31% | 33% | 50% | 50% | 38% | 38% |
+| two steps, the layer's own states | | | 10% | 15% | 29% | 38% | 46% | 58% | 54% | 52% | 38% |
+
+Each label's SigLIP similarity is standardized across the 48 pictures of a column before ranking: with plain
+similarities a few labels ("a lighthouse", "the Colosseum") outscore the true label for many pictures, and a clearly
+drawn Eiffel Tower ranked 14th. Plain ranks are 0-10 points lower and order the layers the same way.
 
 Both kinds become drawable at about the same depth, from layer 26 on, and are more drawable at layers 28-34 than at
-the last layer, the one the generator was trained on, where the empty-state picture (a robed statue) often returns.
-The layer's own states, with no map, draw thoughts best: layer 30 gives 71% of named answers and 48% of two-step
-ones, against 46% and 31% at the last layer. The maps help only on photos (16 photos, layer 34: 69% mapped, 38% with
-no map), so maps fit mostly on photo and caption positions lose part of what thought positions hold.
+the last layer, the one the generator was trained on, where a default picture (a lioness, an elephant figurine)
+often replaces the answer. The layer's own states, with no map, draw thoughts best: layers 28-32 give 73-79% of named
+answers and layer 30 58% of two-step ones, against 54% and 38% at the last layer. Many of these pictures come out as
+sheets with fake text around the object, a style last-layer states rarely give. The maps help only
+on photos (16 photos, layer 34: 69% mapped, 38% with no map), so maps fit mostly on photo and caption positions lose
+part of what thought positions hold.
 
-Two-step answers are drawn less often, not later. With the layers' own states, 32 of 48 named answers and 22 of 48
+Two-step answers are drawn less often, not later. With the layers' own states (plain ranks), 32 of 48 named answers and 22 of 48
 two-step answers stay top-1 from some layer through layer 34, and for the 21 answers that do both, the two-step one
 arrives 0.4 layers later on average (95% bootstrap interval -0.9 to 1.6); with the maps, 0.0 layers (-2.2 to 2.0, 13
 answers). Single examples look like a sequence (Jimi Hendrix's instrument is a man with a saxophone at layers 20-24
@@ -215,7 +221,7 @@ A choice the prompt leaves open is not drawn. In "Let's play a guessing game. Se
 starts with the letter K." with the same ending, for 6 categories and 14 letters, the 8B is afterwards asked in the same
 chat (it replied OK) what it chose (Kangaroo; all 84 answers start with the right letter, and the 14 of each category
 differ). Ranked among the 14 answers of the category (chance 7%), no layer, mapped or not, draws the answer it later
-gives above chance (best 11%), also for the 36 choices that 7 or 8 of 8 sampled answers repeat. At most the category
+gives above chance (best 11%, or 13% with each label's offset removed), also for the 36 choices that 7 or 8 of 8 sampled answers repeat. At most the category
 shows: the same cartoon animal for every animal letter and the same palace for every landmark; the other categories
 get the same few generic pictures whatever the letter. An answer
 determined by a description is drawn from layer 28 on; a choice under a spelling constraint is not drawable at these
