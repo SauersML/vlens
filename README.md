@@ -21,6 +21,7 @@ matching rather than what the model holds.
 |---|---|---|
 | Qwen3-VL-8B's hidden thought: "Think of X. Don't name it or describe it. Just reply OK.", only the positions after "X." | its own layer-28 states, no map, no training | right answer top-1 among 48 for 79% (last layer: 54%) |
 | the same, X described in two steps ("the most famous painting by Leonardo da Vinci") | its own layer-30 states | 58% (last layer: 38%) |
+| the same for 32 harder thoughts (itself, surreal scenes, fears) | its own layer-32 states | 59% top-1 among 32 (the label itself as the prompt: 66%) |
 | Qwen3-VL-8B told a secret password, then the user says "Hi! How's your day going?" (the same reply for all 10) | its own layer-30/32 states at the user's message | right password among 10 for 3-6 of 10 (chance 1); asked for the password directly, 0-2 |
 | Qwen3-VL-4B looking at a photo, one reply-start activation | adapter trained through the generator on the photo | true photo top-1 among 100 for 56%, top-5 89%; 61% best of 4 by readback |
 | Qwen3-VL-4B's hidden thought "Think of X" | adapter trained on Turbo's own path from captions, half in the thought wording | right object top-1 among 24 for 79% (ridge map: 38%) |
@@ -89,6 +90,45 @@ shows: the same cartoon animal for every animal letter and the same palace for e
 get the same few generic pictures whatever the letter. An answer
 determined by a description is drawn from layer 28 on; a choice under a spelling constraint is not drawable at these
 positions before the model is asked for it.
+
+## Thoughts beyond objects
+
+![18 of 32 harder thoughts, from layer 32's own states](docs/think_more.png)
+
+32 new thoughts (`THINK_MORE`): four plain objects as a check, then how the model pictures itself, twelve surreal
+scenes, fears and fun prompts, each as "Think of X." with the same ending, drawn from the layers' own states
+(`VLENS_DEPTH_SETS=more,words VLENS_DEPTH_RAW_ONLY=1`). Ranked among the 32 labels with each label's offset removed
+(chance 3%). The ceiling is the generator's normal use: the label itself as the prompt, last layer.
+
+| top-1 among 32 | 28 | 30 | 32 | 34 | 36 (last) |
+|---|---|---|---|---|---|
+| "Think of X.", the layer's own states (mean of seeds 11 and 12) | 50% | 53% | 59% | 52% | 28% |
+| the label as the prompt (normal use) | | | | | 66% |
+
+Layer 32 draws these best, close to the generator reading the words. What comes through is the main subject: the cat
+made of spaghetti is a cat, the octopus playing the piano an octopus, the astronaut riding a horse a horse, the giant
+rubber duck in the ocean a rubber duck on water. Thoughts without a clear object (a melting clock, a tree growing
+upside down, heaven) and thoughts about the model itself (yourself, how humans see you, the person who created you,
+your worst nightmare) mostly come out as the same toy figure in overalls, which is also the picture of "Think of
+yourself."; "what you look like" is a black-and-white portrait of a man. Run-to-run variation on the same seed is
+several points (layer 30: 44% and 31% in two runs).
+
+![the 12 surreal scenes](docs/think_surreal.png)
+
+**Telling the model the setup** (`VLENS_DEPTH_SETS=more,vivid,setup,setup3,setupthink`). Before "Strongly visually
+imagine X: see it in vivid detail, its shapes, colors and setting, and hold that picture in mind.", the model is told
+that an image generator reads its states at a later layer after the thing it imagines and never sees the text.
+
+![the same thoughts under four prompts](docs/prompts.png)
+
+Told in the second person ("reads your internal states ... whatever you hold vividly in mind"), nearly every thought
+is drawn as the toy figure or the black-and-white man, the pictures of "yourself" and "what you look like": 5% top-1
+at layer 32, and 5% with the plain "Think of X." after the same setup. Told in the third person ("reads the internal
+states of this language model ... whatever the model holds"), 56%, like the plain prompt (59%) and the vivid request
+alone (48%) (layer 32, offsets removed, mean of seeds 11 and 12). Words about the model itself before the thought
+take over what the positions after it hold; asking for a vivid image adds nothing.
+
+![the second-person setup on the 18 thoughts](docs/setup.png)
 
 ## Faithful to what the model holds
 
@@ -257,9 +297,18 @@ a check, then how the model pictures itself, surreal scenes, fears and fun promp
 labels the right one is top-1 for 38% (plain ranks 22%), against 12.5% (9%) for the ridge map; chance is 3%. Plain
 objects come out right. The self prompts draw people, and "the person who created you" a skull on a stand. Surreal
 compositions collapse to one ordinary subject (the cat made of spaghetti is a puppy), and abstract ones to rooms and
-people. The adapter was trained only on COCO captions, which may be the limit rather than the 4B; `vlens layers`
-checks which 4B layer to read, and the untrained lens below draws the same 32 thoughts from Qwen3-VL-8B
-(`VLENS_DEPTH_SETS=more,words`).
+people. Qwen3-VL-8B's own layer-32 states draw the same 32 thoughts right for 59% (above), so this route loses much of
+what a model holds. The layers it reads are not the cause. `vlens layers` fits one ridge map per Qwen3-VL-4B layer
+(the hold activation to the 8B's photo states, as the hold map above):
+
+| top-1, one 4B layer | 9 | 15 | 18 | 21 | 24 | 27 | 30 | 33 | 36 |
+|---|---|---|---|---|---|---|---|---|---|
+| test photos, among 100 | 15% | 20% | 14% | 13% | 5% | 7% | 5% | 4% | 11% |
+| "Think of X", among 24 (offsets removed) | 17% | 29% | 21% | 4% | 12% | 8% | 12% | 17% | 42% |
+| the 32 new thoughts (offsets removed) | 6% | 16% | 12% | 9% | 12% | 6% | 9% | 9% | 12% |
+
+No layer after 27 reads photos better, and none reads the 32 new thoughts above 16%; the last layer reads the 24
+plain objects best.
 
 Training on the adapter's own drawing path for every other caption (Turbo's velocity under the caption text as the
 target at the points the adapter itself reaches, against drift off the path) changed little in the same 100 minutes:
@@ -312,7 +361,7 @@ The code is still here (`vlens data`, `train`, `cycle`, `eval`, `robust`; `scrip
 
 ```
 pip install -e .
-python -m vlens depth OUT [N_FIT]        # picture lens across Qwen3-VL-8B's layers (VLENS_DEPTH_SETS, _LAYERS, _RAW)
+python -m vlens depth OUT [N_FIT]        # picture lens across Qwen3-VL-8B's layers (VLENS_DEPTH_SETS, _LAYERS, _RAW, _RAW_ONLY, _SEED)
 python -m vlens swap OUT                 # faithfulness: one thought mixed into another, pictures against the answer
 python -m vlens qimg OUT [N_TRAIN]       # ridge maps from Qwen3-VL-4B's activation to Qwen-Image-2.1's input
 python -m vlens layers OUT [N_TRAIN]     # which Qwen3-VL-4B layer to read: one ridge map per layer in VLENS_READ
